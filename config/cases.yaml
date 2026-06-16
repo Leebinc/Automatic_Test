@@ -1,0 +1,33 @@
+- case_id: "case_001_udp_demo"
+  description: "第一轮半实物仿真：期望三轴角速度收敛并进入稳定模式"
+  initial_condition:
+    attitude_quat: [1.0, 0.0, 0.0, 0.0]
+    orbit:
+      semi_major_axis_m: 6871000
+      eccentricity: 0.001
+      inclination_deg: 97.4
+      raan_deg: 0.0
+      arg_perigee_deg: 0.0
+      true_anomaly_deg: 0.0
+    angular_rate_deg_s: [1.0, -0.8, 0.5]
+    initial_control_mode: "DETUMBLE"
+  expected:
+    final_control_mode: "STABLE"
+    angular_rate_converged: true
+
+- case_id: "case_002_not_converged"
+  description: "第二轮半实物仿真：模拟最终未收敛的失败场景"
+  initial_condition:
+    attitude_quat: [0.7071, 0.7071, 0.0, 0.0]
+    orbit:
+      semi_major_axis_m: 6871000
+      eccentricity: 0.001
+      inclination_deg: 97.4
+      raan_deg: 10.0
+      arg_perigee_deg: 20.0
+      true_anomaly_deg: 30.0
+    angular_rate_deg_s: [1.2, -1.0, 0.8]
+    initial_control_mode: "DETUMBLE"
+  expected:
+    final_control_mode: "STABLE"
+    angular_rate_converged: true
