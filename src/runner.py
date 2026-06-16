@@ -72,12 +72,32 @@ class SimulationRunner:
         self.post_udp_delay_sec = float(
             simulation_config.get("post_udp_delay_sec", 0.2)
         )
+        self.reset_sequence_delay_sec = float(
+            simulation_config.get("reset_sequence_delay_sec", 3.0)
+        )
 
     def run_once(self, sim_case: SimulationCase):
-        payload = self.udp_client.send_initial_condition(sim_case.initial_condition)
+        reset_clear_payload = self.udp_client.send_initial_condition(
+            sim_case.initial_condition,
+            reset=False,
+        )
         print(
             f"sent initial condition by UDP: "
-            f"case_id={sim_case.case_id}, bytes={len(payload)}"
+            f"case_id={sim_case.case_id}, reset=0, "
+            f"bytes={len(reset_clear_payload)}"
+        )
+
+        if self.reset_sequence_delay_sec > 0:
+            time.sleep(self.reset_sequence_delay_sec)
+
+        reset_start_payload = self.udp_client.send_initial_condition(
+            sim_case.initial_condition,
+            reset=True,
+        )
+        print(
+            f"sent initial condition by UDP: "
+            f"case_id={sim_case.case_id}, reset=1, "
+            f"bytes={len(reset_start_payload)}"
         )
 
         if self.post_udp_delay_sec > 0:

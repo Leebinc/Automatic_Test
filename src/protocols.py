@@ -4,26 +4,9 @@ import struct
 from src.models import InitialCondition, TelemetryFrame, TelemetryParameter
 
 
-INITIAL_CONDITION_MAGIC = b"SIC1"
-INITIAL_CONDITION_VERSION = 1
 INITIAL_CONDITION_ENDIAN = "<"
-INITIAL_CONDITION_BODY_FORMAT = INITIAL_CONDITION_ENDIAN + "4sBBH13d"
-INITIAL_CONDITION_CHECKSUM_FORMAT = INITIAL_CONDITION_ENDIAN + "H"
-INITIAL_CONDITION_FORMAT = (
-    INITIAL_CONDITION_BODY_FORMAT + INITIAL_CONDITION_CHECKSUM_FORMAT[1:]
-)
+INITIAL_CONDITION_BODY_FORMAT = INITIAL_CONDITION_ENDIAN + "6dH5B6f6d3f4B"
 INITIAL_CONDITION_BODY_SIZE = struct.calcsize(INITIAL_CONDITION_BODY_FORMAT)
-INITIAL_CONDITION_CHECKSUM_SIZE = struct.calcsize(INITIAL_CONDITION_CHECKSUM_FORMAT)
-INITIAL_CONDITION_SIZE = struct.calcsize(INITIAL_CONDITION_FORMAT)
-
-CONTROL_MODE_CODES = {
-    "UNKNOWN": 0,
-    "DETUMBLE": 1,
-    "STABLE": 2,
-    "SUN_POINTING": 3,
-    "EARTH_POINTING": 4,
-    "SAFE": 5,
-}
 
 ORBIT_FIELD_ORDER = (
     "semi_major_axis_m",
@@ -31,7 +14,46 @@ ORBIT_FIELD_ORDER = (
     "inclination_deg",
     "raan_deg",
     "arg_perigee_deg",
-    "true_anomaly_deg",
+    "mean_anomaly",
+)
+
+DATE_FIELD_ORDER = (
+    "month",
+    "date",
+    "hour",
+    "minute",
+    "second",
+)
+
+ATTITUDE_FIELD_ORDER = (
+    "roll",
+    "pitch",
+    "yaw",
+    "roll_angular_velocity",
+    "pitch_angular_velocity",
+    "yaw_angular_velocity",
+)
+
+SPARE1_FIELD_ORDER = (
+    "spare1",
+    "spare2",
+    "spare3",
+    "spare4",
+    "spare5",
+    "spare6",
+)
+
+SPARE2_FIELD_ORDER = (
+    "spare7",
+    "spare",
+    "spare8",
+)
+
+CONFIG_FIELD_ORDER = (
+    "Attitude_dynamics_open_closed_loop_control",
+    "Orbit_open_closed_loop_control",
+    "Reset",
+    "Initial_orbit_standard",
 )
 
 
@@ -40,53 +62,68 @@ def calculate_uint16_checksum(data: bytes) -> int:
     return sum(data) & 0xFFFF
 
 
-def encode_initial_condition(condition: InitialCondition) -> bytes:
-    """
-    Encode one simulation initial condition as a fixed-length binary UDP frame.
-
-    Binary layout, little-endian:
-    - magic: 4 bytes, ASCII "SIC1"
-    - version: uint8, currently 1
-    - control_mode: uint8, see CONTROL_MODE_CODES
-    - reserved: uint16, currently 0
-    - attitude_quat: 4 float64, [q0, q1, q2, q3]
-    - orbit: 6 float64, ordered by ORBIT_FIELD_ORDER
-    - angular_rate_deg_s: 3 float64, [wx, wy, wz]
-    - checksum: uint16, byte-sum of all previous frame bytes
-    """
-    if len(condition.attitude_quat) != 4:
-        raise ValueError("attitude_quat must contain 4 values")
-
-    if len(condition.angular_rate_deg_s) != 3:
-        raise ValueError("angular_rate_deg_s must contain 3 values")
-
+def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
     missing_orbit_fields = [
         field for field in ORBIT_FIELD_ORDER if field not in condition.orbit
     ]
     if missing_orbit_fields:
         raise ValueError(f"missing orbit fields: {missing_orbit_fields}")
 
-    control_mode = condition.initial_control_mode.upper()
-    control_mode_code = CONTROL_MODE_CODES.get(control_mode)
-    if control_mode_code is None:
-        raise ValueError(f"unsupported control mode: {condition.initial_control_mode}")
+    if not condition.year:
+        raise ValueError("Invalid year input")
+
+    missing_date_fields = [
+        field for field in DATE_FIELD_ORDER if field not in condition.date_time
+    ]
+    if missing_date_fields:
+        raise ValueError(f"missing date fields: {missing_date_fields}")
+
+    missing_attitude_fields = [
+        field for field in ATTITUDE_FIELD_ORDER if field not in condition.attitude
+    ]
+    if missing_attitude_fields:
+        raise ValueError(f"missing attitude fields: {missing_attitude_fields}")
+
+    missing_spare1_fields = [
+        field for field in SPARE1_FIELD_ORDER if field not in condition.Spare1
+    ]
+    if missing_spare1_fields:
+        raise ValueError(f"missing sapre1 fields: {missing_spare1_fields}")
+
+    missing_spare2_fields = [
+        field for field in SPARE2_FIELD_ORDER if field not in condition.Spare2
+    ]
+    if missing_spare2_fields:
+        raise ValueError(f"missing sapre2 fields: {missing_spare2_fields}")
+
+    missing_config_fields = [
+        field for field in CONFIG_FIELD_ORDER if field not in condition.Config
+    ]
+    if missing_config_fields:
+        raise ValueError(f"missing config fields: {missing_config_fields}")
 
     values = (
-        [float(value) for value in condition.attitude_quat]
-        + [float(condition.orbit[field]) for field in ORBIT_FIELD_ORDER]
-        + [float(value) for value in condition.angular_rate_deg_s]
+        [float(condition.orbit[field]) for field in ORBIT_FIELD_ORDER]
+        + [int(condition.year)]
+        + [int(condition.date_time[field]) for field in DATE_FIELD_ORDER]
+        + [float(condition.attitude[field]) for field in ATTITUDE_FIELD_ORDER]
+        + [float(condition.Spare1[field]) for field in SPARE1_FIELD_ORDER]
+        + [float(condition.Spare2[field]) for field in SPARE2_FIELD_ORDER]
+        + [int(condition.Config["Attitude_dynamics_open_closed_loop_control"])]
+        + [int(condition.Config["Orbit_open_closed_loop_control"])]
+        + [
+            int(condition.Config["Reset"][0])
+            if not reset
+            else int(condition.Config["Reset"][1])
+        ]
+        + [int(condition.Config["Initial_orbit_standard"])]
     )
 
     body = struct.pack(
         INITIAL_CONDITION_BODY_FORMAT,
-        INITIAL_CONDITION_MAGIC,
-        INITIAL_CONDITION_VERSION,
-        control_mode_code,
-        0,
         *values,
     )
-    checksum = calculate_uint16_checksum(body)
-    return body + struct.pack(INITIAL_CONDITION_CHECKSUM_FORMAT, checksum)
+    return body
 
 
 def decode_telemetry_frame(line: bytes) -> TelemetryFrame:

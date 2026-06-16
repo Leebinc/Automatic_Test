@@ -10,9 +10,9 @@ class UdpInitialConditionClient:
         self.port = port
         self.timeout_sec = timeout_sec
 
-    def send_initial_condition(self, condition: InitialCondition) -> bytes:
+    def send_initial_condition(self, condition: InitialCondition, reset: bool) -> bytes:
         """Send one binary initial-condition frame by UDP."""
-        payload = encode_initial_condition(condition)
+        payload = encode_initial_condition(condition, reset)
 
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
             udp_socket.settimeout(self.timeout_sec)

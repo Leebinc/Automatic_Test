@@ -3,10 +3,13 @@ from dataclasses import dataclass
 
 @dataclass
 class InitialCondition:
-    attitude_quat: list[float]
     orbit: dict[str, float]
-    angular_rate_deg_s: list[float]
-    initial_control_mode: str
+    year: int
+    date_time: dict[str, int]
+    attitude: dict[str, float]
+    Spare1: dict[str, float]
+    Spare2: dict[str, float]
+    Config: dict
 
 
 @dataclass
