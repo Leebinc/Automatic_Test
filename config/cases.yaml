@@ -7,7 +7,7 @@
       inclination_deg: 97.4
       raan_deg: 0.0
       arg_perigee_deg: 0.0
-      mean_anomaly: 0.0
+      mean_anomaly_deg: 0.0
     year: 2025
     date_time:
       month: 6
@@ -34,10 +34,10 @@
       spare: 0.0
       spare8: 0.0
     Config:
-      Attitude_dynamics_open_closed_loop_control: 0
-      Orbit_open_closed_loop_control: 0
+      Attitude_dynamics_open_closed_loop_control: 1
+      Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
-      Initial_orbit_standard: 0
+      Initial_orbit_standard: 1
       
   expected:
     final_control_mode: "STABLE"
@@ -52,7 +52,7 @@
       inclination_deg: 97.4
       raan_deg: 0.0
       arg_perigee_deg: 0.0
-      mean_anomaly: 0.0
+      mean_anomaly_deg: 0.0
     year: 2025
     date_time:
       month: 6
@@ -79,10 +79,10 @@
       spare: 0.0
       spare8: 0.0
     Config:
-      Attitude_dynamics_open_closed_loop_control: 0
-      Orbit_open_closed_loop_control: 0
+      Attitude_dynamics_open_closed_loop_control: 1
+      Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
-      Initial_orbit_standard: 0
+      Initial_orbit_standard: 1
   expected:
     final_control_mode: "STABLE"
     angular_rate_converged: true
