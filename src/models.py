@@ -24,6 +24,7 @@ class SimulationCase:
     description: str
     initial_condition: InitialCondition
     expected: ExpectedResult
+    telecommand: object | None = None
 
 
 @dataclass

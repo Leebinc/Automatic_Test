@@ -9,6 +9,7 @@ from src.protocols import (
     decode_telemetry_response_frame,
     decode_telemetry_response_parameters,
     encode_tcp_json_command,
+    encode_tcp_payload,
 )
 
 
@@ -74,6 +75,18 @@ class TcpTelemetryClient:
     def request_once(self, command: dict) -> dict:
         with self._connect() as sock:
             self._send_command(sock, command)
+            return self._receive_response(sock, b"")[0]
+
+    def send_payload(
+        self,
+        payload,
+        expect_response: bool = True,
+        append_newline: bool = True,
+    ) -> dict | None:
+        with self._connect() as sock:
+            sock.sendall(encode_tcp_payload(payload, append_newline=append_newline))
+            if not expect_response:
+                return None
             return self._receive_response(sock, b"")[0]
 
     def receive_frames(

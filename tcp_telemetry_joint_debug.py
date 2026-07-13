@@ -15,6 +15,13 @@ def parse_tm_codes(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def parse_payload(value: str):
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 def build_client(args) -> TcpTelemetryClient:
     env_config = load_yaml(args.env)
     tcp_config = env_config.get("tcp", {})
@@ -77,13 +84,28 @@ def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
             break
 
 
+def run_send(
+    client: TcpTelemetryClient,
+    payload,
+    expect_response: bool,
+    append_newline: bool,
+) -> None:
+    response = client.send_payload(
+        payload=payload,
+        expect_response=expect_response,
+        append_newline=append_newline,
+    )
+    if response is not None:
+        print_json(response)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Joint-debug tool for the JSON TCP telemetry protocol."
     )
     parser.add_argument(
         "command",
-        choices=("ping", "get", "list", "poll"),
+        choices=("ping", "get", "list", "poll", "send"),
         help="TCP telemetry command to run.",
     )
     parser.add_argument("--env", default=ENV_CONFIG_PATH)
@@ -96,6 +118,17 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument("--payload", help="JSON or raw text payload for send.")
+    parser.add_argument(
+        "--no-response",
+        action="store_true",
+        help="Do not wait for a TCP response after send.",
+    )
+    parser.add_argument(
+        "--no-newline",
+        action="store_true",
+        help="Do not append newline to the send payload.",
+    )
     args = parser.parse_args()
 
     client = build_client(args)
@@ -115,6 +148,15 @@ def main() -> None:
         if not client.telemetry_poll_codes:
             parser.error("--tm-codes or tcp.telemetry_poll_codes is required for poll")
         run_poll(client, args.duration)
+    elif args.command == "send":
+        if args.payload is None:
+            parser.error("--payload is required for send")
+        run_send(
+            client=client,
+            payload=parse_payload(args.payload),
+            expect_response=not args.no_response,
+            append_newline=not args.no_newline,
+        )
 
 
 if __name__ == "__main__":

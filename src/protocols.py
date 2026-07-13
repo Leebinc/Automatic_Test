@@ -14,7 +14,7 @@ ORBIT_FIELD_ORDER = (
     "inclination_deg",
     "raan_deg",
     "arg_perigee_deg",
-    "mean_anomaly",
+    "mean_anomaly_deg",
 )
 
 DATE_FIELD_ORDER = (
@@ -111,11 +111,7 @@ def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
         + [float(condition.Spare2[field]) for field in SPARE2_FIELD_ORDER]
         + [int(condition.Config["Attitude_dynamics_open_closed_loop_control"])]
         + [int(condition.Config["Orbit_open_closed_loop_control"])]
-        + [
-            int(condition.Config["Reset"][0])
-            if not reset
-            else int(condition.Config["Reset"][1])
-        ]
+        + [int(condition.Config["Reset"][1 if reset else 0])]
         + [int(condition.Config["Initial_orbit_standard"])]
     )
 
@@ -149,6 +145,28 @@ def decode_telemetry_frame(line: bytes) -> TelemetryFrame:
 def encode_tcp_json_command(payload: dict) -> bytes:
     """Encode one TCP JSON command. The server requires one JSON object per line."""
     return json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
+
+
+def encode_tcp_payload(payload, append_newline: bool = True) -> bytes:
+    """
+    Encode one TCP application-layer payload.
+
+    JSON remains the protocol format for dict/list payloads. The return value is
+    bytes because Python sockets transmit bytes over TCP.
+    """
+    if isinstance(payload, bytes):
+        data = payload
+    elif isinstance(payload, bytearray):
+        data = bytes(payload)
+    elif isinstance(payload, (dict, list)):
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    else:
+        data = str(payload).encode("utf-8")
+
+    if append_newline and not data.endswith(b"\n"):
+        data += b"\n"
+
+    return data
 
 
 def decode_tcp_json_response(line: bytes) -> dict:

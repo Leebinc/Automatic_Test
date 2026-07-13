@@ -5,6 +5,7 @@ import yaml
 from src.models import ExpectedResult, InitialCondition, SimulationCase
 from src.tcp_telemetry_client import TcpTelemetryClient
 from src.udp_client import UdpInitialConditionClient
+from src.validators import is_angular_rate_below_threshold
 
 
 def load_yaml(path: str):
@@ -23,6 +24,7 @@ def load_cases(path: str) -> list[SimulationCase]:
                 description=item["description"],
                 initial_condition=InitialCondition(**item["initial_condition"]),
                 expected=ExpectedResult(**item["expected"]),
+                telecommand=item.get("telecommand"),
             )
         )
 
@@ -44,6 +46,8 @@ class SimulationRunner:
         udp_config = env_config["udp"]
         tcp_config = env_config["tcp"]
         simulation_config = env_config.get("simulation", {})
+        validation_config = env_config.get("validation", {})
+        self.telecommand_config = env_config.get("telecommand", {})
 
         self.udp_client = UdpInitialConditionClient(
             host=udp_config["host"],
@@ -75,6 +79,21 @@ class SimulationRunner:
         self.reset_sequence_delay_sec = float(
             simulation_config.get("reset_sequence_delay_sec", 3.0)
         )
+        self.angular_rate_threshold_deg_s = float(
+            validation_config.get("angular_rate_threshold_deg_s", 0.05)
+        )
+        self.convergence_hold_sec = float(
+            validation_config.get("convergence_hold_sec", 5.0)
+        )
+        self.stop_when_converged = _bool_config(
+            validation_config.get("stop_when_converged", True)
+        )
+        self.fail_fast_control_mode = _bool_config(
+            validation_config.get("fail_fast_control_mode", True)
+        )
+        self.mode_check_grace_sec = float(
+            validation_config.get("mode_check_grace_sec", 0.0)
+        )
 
     def run_once(self, sim_case: SimulationCase):
         reset_clear_payload = self.udp_client.send_initial_condition(
@@ -103,24 +122,124 @@ class SimulationRunner:
         if self.post_udp_delay_sec > 0:
             time.sleep(self.post_udp_delay_sec)
 
+        self._send_telecommand_if_configured(sim_case)
+
         frames = []
         start_time = time.monotonic()
+        convergence_start_sec = None
+        converged = False
 
         for frame in self._receive_frames():
             frames.append(frame)
+            elapsed_sec = time.monotonic() - start_time
+
+            self._assert_control_mode_if_needed(
+                sim_case=sim_case,
+                frame=frame,
+                elapsed_sec=elapsed_sec,
+            )
+
+            frame_time_sec = frame.timestamp_sec if frame.timestamp_sec > 0 else elapsed_sec
+            if is_angular_rate_below_threshold(
+                frame=frame,
+                threshold_deg_s=self.angular_rate_threshold_deg_s,
+            ):
+                if convergence_start_sec is None:
+                    convergence_start_sec = frame_time_sec
+
+                if frame_time_sec - convergence_start_sec >= self.convergence_hold_sec:
+                    converged = True
+                    if self.stop_when_converged:
+                        print(
+                            f"stop receiving telemetry because angular rate "
+                            f"converged for {self.convergence_hold_sec}s"
+                        )
+                        break
+            else:
+                convergence_start_sec = None
 
             if frame.sim_status == "FINISHED":
                 break
 
-            if time.monotonic() - start_time >= self.max_duration_sec:
+            if elapsed_sec >= self.max_duration_sec:
                 print(
                     f"stop receiving telemetry because max_duration_sec "
                     f"was reached: {self.max_duration_sec}s"
                 )
                 break
 
-        print(f"received telemetry frames: {len(frames)}")
+        print(f"received telemetry frames: {len(frames)}, converged={converged}")
         return frames
+
+    def _send_telecommand_if_configured(self, sim_case: SimulationCase) -> None:
+        telecommand_config = self._resolve_telecommand_config(sim_case)
+        payload = telecommand_config.get("payload")
+        enabled = _bool_config(telecommand_config.get("enabled", payload is not None))
+
+        if not enabled or payload is None:
+            return
+
+        expect_response = _bool_config(
+            telecommand_config.get("expect_response", True)
+        )
+        append_newline = _bool_config(
+            telecommand_config.get("append_newline", True)
+        )
+        response = self.tcp_client.send_payload(
+            payload=payload,
+            expect_response=expect_response,
+            append_newline=append_newline,
+        )
+        print(
+            f"sent telecommand by TCP: "
+            f"case_id={sim_case.case_id}, expect_response={expect_response}"
+        )
+        if response is not None:
+            print(f"telecommand response: {response}")
+
+        post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
+        if post_delay_sec > 0:
+            time.sleep(post_delay_sec)
+
+    def _resolve_telecommand_config(self, sim_case: SimulationCase) -> dict:
+        config = dict(self.telecommand_config)
+        case_telecommand = sim_case.telecommand
+
+        if case_telecommand is None:
+            return config
+
+        if isinstance(case_telecommand, dict) and (
+            "payload" in case_telecommand or "enabled" in case_telecommand
+        ):
+            config.update(case_telecommand)
+        else:
+            config["payload"] = case_telecommand
+
+        return config
+
+    def _assert_control_mode_if_needed(
+        self,
+        sim_case: SimulationCase,
+        frame,
+        elapsed_sec: float,
+    ) -> None:
+        if not self.fail_fast_control_mode:
+            return
+
+        if elapsed_sec < self.mode_check_grace_sec:
+            return
+
+        expected_mode = sim_case.expected.final_control_mode
+        if not expected_mode:
+            return
+
+        if frame.control_mode != expected_mode:
+            raise AssertionError(
+                f"{sim_case.case_id} control mode mismatch during telemetry; "
+                f"expected={expected_mode}, actual={frame.control_mode}, "
+                f"t={frame.timestamp_sec:.3f}s, "
+                f"rate={frame.angular_rate_deg_s}"
+            )
 
     def _receive_frames(self):
         try:
@@ -129,3 +248,11 @@ class SimulationRunner:
             )
         except TypeError:
             yield from self.tcp_client.receive_frames()
+
+
+def _bool_config(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
