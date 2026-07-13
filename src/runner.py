@@ -158,9 +158,6 @@ class SimulationRunner:
             else:
                 convergence_start_sec = None
 
-            if frame.sim_status == "FINISHED":
-                break
-
             if elapsed_sec >= self.max_duration_sec:
                 print(
                     f"stop receiving telemetry because max_duration_sec "
@@ -242,12 +239,9 @@ class SimulationRunner:
             )
 
     def _receive_frames(self):
-        try:
-            yield from self.tcp_client.receive_frames(
-                max_duration_sec=self.max_duration_sec
-            )
-        except TypeError:
-            yield from self.tcp_client.receive_frames()
+        yield from self.tcp_client.receive_frames(
+            max_duration_sec=self.max_duration_sec
+        )
 
 
 def _bool_config(value) -> bool:

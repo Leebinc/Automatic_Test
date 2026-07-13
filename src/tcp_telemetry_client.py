@@ -5,7 +5,6 @@ from collections.abc import Iterator
 from src.models import TelemetryFrame
 from src.protocols import (
     decode_tcp_json_response,
-    decode_telemetry_frame,
     decode_telemetry_response_frame,
     decode_telemetry_response_parameters,
     encode_tcp_json_command,
@@ -93,43 +92,13 @@ class TcpTelemetryClient:
         self,
         max_duration_sec: float | None = None,
     ) -> Iterator[TelemetryFrame]:
-        if self.telemetry_poll_codes:
-            yield from self._poll_frames(max_duration_sec=max_duration_sec)
-            return
+        if not self.telemetry_poll_codes:
+            raise ValueError(
+                "tcp.telemetry_poll_codes must be configured for the JSON "
+                "request-response telemetry protocol"
+            )
 
-        buffer = b""
-
-        with self._connect() as sock:
-            start_time = time.monotonic()
-
-            while True:
-                if (
-                    max_duration_sec is not None
-                    and time.monotonic() - start_time >= max_duration_sec
-                ):
-                    return
-
-                try:
-                    data = sock.recv(self.recv_buffer_size)
-                except socket.timeout:
-                    continue
-
-                if not data:
-                    break
-
-                buffer += data
-
-                while b"\n" in buffer:
-                    line, buffer = buffer.split(b"\n", 1)
-                    line = line.strip()
-                    if not line:
-                        continue
-
-                    frame = decode_telemetry_frame(line)
-                    yield frame
-
-                    if frame.sim_status == "FINISHED":
-                        return
+        yield from self._poll_frames(max_duration_sec=max_duration_sec)
 
     def _poll_frames(
         self,
@@ -155,9 +124,6 @@ class TcpTelemetryClient:
                     field_codes=self.telemetry_frame_field_codes,
                 )
                 yield frame
-
-                if frame.sim_status == "FINISHED":
-                    return
 
                 time.sleep(self.poll_interval_sec)
 

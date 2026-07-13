@@ -122,26 +122,6 @@ def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
     return body
 
 
-def decode_telemetry_frame(line: bytes) -> TelemetryFrame:
-    payload = json.loads(line.decode("utf-8"))
-
-    if "code" in payload and "data" in payload:
-        return decode_telemetry_response_frame(payload)
-
-    return TelemetryFrame(
-        case_id=str(payload.get("case_id", "")),
-        timestamp_sec=float(payload["timestamp_sec"]),
-        angular_rate_deg_s=[
-            float(payload["angular_rate_deg_s"][0]),
-            float(payload["angular_rate_deg_s"][1]),
-            float(payload["angular_rate_deg_s"][2]),
-        ],
-        control_mode=str(payload["control_mode"]),
-        sim_status=str(payload.get("sim_status", "RUNNING")),
-        raw=payload,
-    )
-
-
 def encode_tcp_json_command(payload: dict) -> bytes:
     """Encode one TCP JSON command. The server requires one JSON object per line."""
     return json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
@@ -226,7 +206,6 @@ def decode_telemetry_response_frame(
     - timestamp_ms: telemetry code whose value is milliseconds
     - angular_rate_deg_s: list of three telemetry codes [x, y, z]
     - control_mode: telemetry code whose value is the mode string
-    - sim_status: telemetry code whose value is RUNNING/FINISHED
     """
     field_codes = field_codes or {}
     parameters = decode_telemetry_response_parameters(response)
@@ -273,7 +252,7 @@ def decode_telemetry_response_frame(
         timestamp_sec=timestamp_sec,
         angular_rate_deg_s=angular_rate_deg_s,
         control_mode=str(value_for("control_mode", "UNKNOWN")),
-        sim_status=str(value_for("sim_status", "RUNNING")),
+        sim_status="RUNNING",
         raw=response,
     )
 

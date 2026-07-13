@@ -75,8 +75,7 @@ def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
             "frame "
             f"t={frame.timestamp_sec:.3f}s "
             f"rate={frame.angular_rate_deg_s} "
-            f"mode={frame.control_mode} "
-            f"status={frame.sim_status}"
+            f"mode={frame.control_mode}"
         )
         print_json(frame.raw)
 

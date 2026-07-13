@@ -6,91 +6,115 @@ import time
 HOST = "0.0.0.0"
 PORT = 9000
 TOTAL_DURATION_SEC = 60.0
-SEND_INTERVAL_SEC = 0.1
-
-SCENARIOS = [
-    {
-        "case_id": "case_001_udp_demo",
-        "name": "converged",
-        "should_converge": True,
-    },
-    {
-        "case_id": "case_002_not_converged",
-        "name": "not_converged",
-        "should_converge": False,
-    },
-]
 
 
-def build_telemetry_frame(timestamp_sec: float, scenario: dict) -> dict:
-    if scenario["should_converge"]:
-        progress = min(timestamp_sec / 30.0, 1.0)
-        wx = 1.0 * (1.0 - progress)
-        wy = -0.8 * (1.0 - progress)
-        wz = 0.5 * (1.0 - progress)
-    else:
-        progress = min(timestamp_sec / TOTAL_DURATION_SEC, 1.0)
-        wx = 1.2 - 0.4 * progress
-        wy = -1.0 + 0.3 * progress
-        wz = 0.8 - 0.2 * progress
-
-    control_mode = "DETUMBLE" if timestamp_sec < 15.0 else "STABLE"
-    sim_status = "FINISHED" if timestamp_sec >= TOTAL_DURATION_SEC else "RUNNING"
+def build_telemetry_values(elapsed_sec: float) -> dict:
+    progress = min(elapsed_sec / 30.0, 1.0)
+    timestamp_ms = int(elapsed_sec * 1000)
 
     return {
-        "case_id": scenario["case_id"],
-        "timestamp_sec": round(timestamp_sec, 3),
-        "angular_rate_deg_s": [round(wx, 6), round(wy, 6), round(wz, 6)],
-        "control_mode": control_mode,
-        "sim_status": sim_status,
+        "WX": 1.0 * (1.0 - progress),
+        "WY": -0.8 * (1.0 - progress),
+        "WZ": 0.5 * (1.0 - progress),
+        "MODE": "STABLE",
+        "TIME_MS": timestamp_ms,
     }
 
 
-def send_one_simulation(conn: socket.socket, scenario: dict) -> None:
-    frame_count = int(TOTAL_DURATION_SEC / SEND_INTERVAL_SEC) + 1
+def build_parameter(tm_code: str, values: dict, timestamp_ms: int) -> dict | None:
+    if tm_code not in values:
+        return None
 
-    for index in range(frame_count):
-        timestamp_sec = min(index * SEND_INTERVAL_SEC, TOTAL_DURATION_SEC)
-        frame = build_telemetry_frame(timestamp_sec, scenario)
-        line = json.dumps(frame).encode("utf-8") + b"\n"
-        conn.sendall(line)
+    return {
+        "tmCode": tm_code,
+        "tmName": tm_code,
+        "subsystem": "simulator",
+        "value": values[tm_code],
+        "state": 0,
+        "stateMessage": "normal",
+        "source": 0,
+        "valid": 2,
+        "timestampMs": timestamp_ms,
+        "sourceType": "simulator",
+    }
 
-        print(
-            "sent "
-            f"case={frame['case_id']} "
-            f"t={frame['timestamp_sec']:.1f}s "
-            f"rate={frame['angular_rate_deg_s']} "
-            f"mode={frame['control_mode']} "
-            f"status={frame['sim_status']}"
-        )
 
-        if frame["sim_status"] == "FINISHED":
-            break
+def build_response(request: dict, connection_start_time: float) -> dict:
+    cmd = request.get("cmd")
+    elapsed_sec = min(time.monotonic() - connection_start_time, TOTAL_DURATION_SEC)
+    values = build_telemetry_values(elapsed_sec)
+    timestamp_ms = values["TIME_MS"]
 
-        time.sleep(SEND_INTERVAL_SEC)
+    if cmd == "ping":
+        return {"code": 0, "msg": "pong"}
+
+    if cmd == "get":
+        tm_code = request.get("tmCode")
+        parameter = build_parameter(str(tm_code), values, timestamp_ms)
+        if parameter is None:
+            return {"code": 404, "msg": f"telemetry code not found: {tm_code}"}
+        return {"code": 0, "msg": "success", "data": parameter}
+
+    if cmd == "list":
+        tm_codes = request.get("tmCodes")
+        if not isinstance(tm_codes, list) or not tm_codes:
+            return {"code": 400, "msg": "tmCodes must be a non-empty array"}
+
+        parameters = []
+        for tm_code in tm_codes:
+            parameter = build_parameter(str(tm_code), values, timestamp_ms)
+            if parameter is None:
+                return {"code": 404, "msg": f"telemetry code not found: {tm_code}"}
+            parameters.append(parameter)
+
+        return {"code": 0, "msg": "success", "data": parameters}
+
+    return {"code": 400, "msg": "cmd must be get/list/ping"}
+
+
+def handle_connection(conn: socket.socket, addr) -> None:
+    print(f"client connected from {addr[0]}:{addr[1]}")
+    buffer = b""
+    connection_start_time = time.monotonic()
+
+    with conn:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                print(f"client disconnected from {addr[0]}:{addr[1]}")
+                return
+
+            buffer += data
+
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    request = json.loads(line.decode("utf-8"))
+                    response = build_response(request, connection_start_time)
+                except json.JSONDecodeError:
+                    response = {"code": 400, "msg": "Invalid JSON"}
+
+                conn.sendall(
+                    json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n"
+                )
 
 
 def run_server() -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((HOST, PORT))
-        server_socket.listen(1)
+        server_socket.listen(5)
 
-        print(f"TCP telemetry simulator listening on {HOST}:{PORT}")
-        print(f"waiting for {len(SCENARIOS)} simulation connection(s)")
+        print(f"TCP telemetry JSON simulator listening on {HOST}:{PORT}")
+        print("waiting for JSON request-response connections")
 
-        for scenario_index, scenario in enumerate(SCENARIOS, start=1):
+        while True:
             conn, addr = server_socket.accept()
-
-            with conn:
-                print(
-                    f"client connected from {addr[0]}:{addr[1]}, "
-                    f"scenario {scenario_index}/{len(SCENARIOS)}: "
-                    f"{scenario['name']}"
-                )
-                send_one_simulation(conn, scenario)
-
-        print("TCP telemetry simulator finished all scenarios")
+            handle_connection(conn, addr)
 
 
 if __name__ == "__main__":
