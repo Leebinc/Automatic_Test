@@ -23,7 +23,8 @@ class TcpTelemetryClient:
         connect_retry_interval_sec: float = 0.5,
         telemetry_poll_codes: list[str] | None = None,
         telemetry_frame_field_codes: dict | None = None,
-        poll_interval_sec: float = 0.1,
+        poll_interval_sec: float = 1.0,
+        heartbeat_interval_sec: float | None = None,
     ):
         self.host = host
         self.port = port
@@ -34,6 +35,7 @@ class TcpTelemetryClient:
         self.telemetry_poll_codes = telemetry_poll_codes or []
         self.telemetry_frame_field_codes = telemetry_frame_field_codes or {}
         self.poll_interval_sec = poll_interval_sec
+        self.heartbeat_interval_sec = heartbeat_interval_sec
 
     def _connect(self) -> socket.socket:
         deadline = time.monotonic() + self.connect_retry_timeout_sec
@@ -109,13 +111,21 @@ class TcpTelemetryClient:
 
         with self._connect() as sock:
             start_time = time.monotonic()
+            last_heartbeat_time = start_time
 
             while True:
+                now = time.monotonic()
                 if (
                     max_duration_sec is not None
-                    and time.monotonic() - start_time >= max_duration_sec
+                    and now - start_time >= max_duration_sec
                 ):
                     return
+
+                if self._heartbeat_due(now, last_heartbeat_time):
+                    self._send_command(sock, {"cmd": "ping"})
+                    response, buffer = self._receive_response(sock, buffer)
+                    self._validate_heartbeat_response(response)
+                    last_heartbeat_time = now
 
                 self._send_command(sock, command)
                 response, buffer = self._receive_response(sock, buffer)
@@ -126,6 +136,21 @@ class TcpTelemetryClient:
                 yield frame
 
                 time.sleep(self.poll_interval_sec)
+
+    def _heartbeat_due(self, now: float, last_heartbeat_time: float) -> bool:
+        return (
+            self.heartbeat_interval_sec is not None
+            and self.heartbeat_interval_sec > 0
+            and now - last_heartbeat_time >= self.heartbeat_interval_sec
+        )
+
+    def _validate_heartbeat_response(self, response: dict) -> None:
+        code = int(response.get("code", -1))
+        if code != 0:
+            raise ConnectionError(
+                f"TCP telemetry heartbeat failed: "
+                f"code={code}, msg={response.get('msg', '')}"
+            )
 
     def _send_command(self, sock: socket.socket, command: dict) -> None:
         sock.sendall(encode_tcp_json_command(command))

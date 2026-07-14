@@ -1,5 +1,6 @@
 import json
 import struct
+from datetime import datetime, timezone
 
 from src.models import InitialCondition, TelemetryFrame, TelemetryParameter
 
@@ -149,6 +150,58 @@ def encode_tcp_payload(payload, append_newline: bool = True) -> bytes:
     return data
 
 
+def encode_hex_source(hex_source: str) -> bytes:
+    compact = "".join(str(hex_source).split())
+    if compact.lower().startswith("0x"):
+        compact = compact[2:]
+    if len(compact) % 2 != 0:
+        raise ValueError("hex source length must be even")
+    return bytes.fromhex(compact)
+
+
+def initial_condition_seconds_since_epoch(
+    condition: InitialCondition,
+    epoch_year: int = 2006,
+) -> int:
+    date_time = condition.date_time
+    initial_time = datetime(
+        year=int(condition.year),
+        month=int(date_time["month"]),
+        day=int(date_time["date"]),
+        hour=int(date_time["hour"]),
+        minute=int(date_time["minute"]),
+        second=int(date_time["second"]),
+        tzinfo=timezone.utc,
+    )
+    epoch = datetime(epoch_year, 1, 1, tzinfo=timezone.utc)
+    seconds = int((initial_time - epoch).total_seconds())
+    if seconds < 0:
+        raise ValueError(
+            f"initial condition time must be after {epoch_year}-01-01 00:00:00"
+        )
+    return seconds
+
+
+def encode_time_sync_hex_source(
+    hex_source: str,
+    condition: InitialCondition,
+    placeholder_hex: str,
+    epoch_year: int = 2006,
+) -> bytes:
+    payload = encode_hex_source(hex_source)
+    placeholder = encode_hex_source(placeholder_hex)
+    seconds = initial_condition_seconds_since_epoch(condition, epoch_year=epoch_year)
+    encoded_seconds = seconds.to_bytes(4, byteorder="big", signed=False)
+
+    index = payload.find(placeholder)
+    if index < 0:
+        raise ValueError(
+            f"time placeholder {placeholder_hex} was not found in time-sync command"
+        )
+
+    return payload[:index] + encoded_seconds + payload[index + len(placeholder):]
+
+
 def decode_tcp_json_response(line: bytes) -> dict:
     return json.loads(line.decode("utf-8"))
 
@@ -204,8 +257,10 @@ def decode_telemetry_response_frame(
     - case_id: telemetry code whose value is the case id
     - timestamp_sec: telemetry code whose value is seconds
     - timestamp_ms: telemetry code whose value is milliseconds
+    - attitude_angle_deg: list of three telemetry codes [roll, pitch, yaw]
     - angular_rate_deg_s: list of three telemetry codes [x, y, z]
     - control_mode: telemetry code whose value is the mode string
+    - attitude_reference: telemetry code whose value is the attitude reference
     """
     field_codes = field_codes or {}
     parameters = decode_telemetry_response_parameters(response)
@@ -233,28 +288,52 @@ def decode_telemetry_response_frame(
             ]
             timestamp_sec = max(timestamps) / 1000.0 if timestamps else 0.0
 
-    angular_rate_codes = field_codes.get("angular_rate_deg_s", [])
-    if isinstance(angular_rate_codes, dict):
-        angular_rate_codes = [
-            angular_rate_codes.get("x"),
-            angular_rate_codes.get("y"),
-            angular_rate_codes.get("z"),
-        ]
-    angular_rate_deg_s = []
-    for tm_code in list(angular_rate_codes or [])[:3]:
-        item = by_code.get(str(tm_code))
-        angular_rate_deg_s.append(float(item.value) if item is not None else 0.0)
-    while len(angular_rate_deg_s) < 3:
-        angular_rate_deg_s.append(0.0)
+    attitude_angle_deg = _three_axis_values(
+        by_code=by_code,
+        field_codes=field_codes.get("attitude_angle_deg", []),
+        axis_names=("roll", "pitch", "yaw"),
+    )
+    angular_rate_deg_s = _three_axis_values(
+        by_code=by_code,
+        field_codes=field_codes.get("angular_rate_deg_s", []),
+        axis_names=("x", "y", "z"),
+    )
 
     return TelemetryFrame(
         case_id=str(value_for("case_id", "")),
         timestamp_sec=timestamp_sec,
+        attitude_angle_deg=attitude_angle_deg,
         angular_rate_deg_s=angular_rate_deg_s,
         control_mode=str(value_for("control_mode", "UNKNOWN")),
+        attitude_reference=str(value_for("attitude_reference", "UNKNOWN")),
         sim_status="RUNNING",
         raw=response,
     )
+
+
+def _three_axis_values(
+    by_code: dict[str, TelemetryParameter],
+    field_codes,
+    axis_names: tuple[str, str, str],
+) -> list[float]:
+    if isinstance(field_codes, dict):
+        field_codes = [field_codes.get(axis) for axis in axis_names]
+
+    configured_codes = list(field_codes or [])[:3]
+    if len(configured_codes) != 3 or any(code is None for code in configured_codes):
+        raise ValueError(
+            f"three telemetry codes must be configured for axes {axis_names}: "
+            f"{configured_codes!r}"
+        )
+
+    values = []
+    for tm_code in configured_codes:
+        item = by_code.get(str(tm_code))
+        if item is None:
+            raise ValueError(f"telemetry response is missing code: {tm_code}")
+        values.append(float(item.value))
+
+    return values
 
 
 def _optional_int(value) -> int | None:

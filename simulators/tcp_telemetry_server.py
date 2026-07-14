@@ -13,10 +13,14 @@ def build_telemetry_values(elapsed_sec: float) -> dict:
     timestamp_ms = int(elapsed_sec * 1000)
 
     return {
+        "ROLL": 8.0 * (1.0 - progress),
+        "PITCH": -6.0 * (1.0 - progress),
+        "YAW": 4.0 * (1.0 - progress),
         "WX": 1.0 * (1.0 - progress),
         "WY": -0.8 * (1.0 - progress),
         "WZ": 0.5 * (1.0 - progress),
         "MODE": "STABLE",
+        "ATT_REF": "SUN",
         "TIME_MS": timestamp_ms,
     }
 

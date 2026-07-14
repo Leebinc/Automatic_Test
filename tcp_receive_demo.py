@@ -30,8 +30,10 @@ def receive_tcp_telemetry() -> list:
 
         print(
             f"received t={frame.timestamp_sec:.1f}s "
+            f"angle={frame.attitude_angle_deg} "
             f"rate={frame.angular_rate_deg_s} "
-            f"mode={frame.control_mode}"
+            f"mode={frame.control_mode} "
+            f"attitude_reference={frame.attitude_reference}"
         )
 
     print(f"received total frames: {len(frames)}")

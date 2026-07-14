@@ -15,7 +15,8 @@ class InitialCondition:
 @dataclass
 class ExpectedResult:
     final_control_mode: str
-    angular_rate_converged: bool
+    attitude_angle_converged: bool
+    final_attitude_reference: str
 
 
 @dataclass
@@ -31,8 +32,10 @@ class SimulationCase:
 class TelemetryFrame:
     case_id: str
     timestamp_sec: float
+    attitude_angle_deg: list[float]
     angular_rate_deg_s: list[float]
     control_mode: str
+    attitude_reference: str
     sim_status: str
     raw: dict
 

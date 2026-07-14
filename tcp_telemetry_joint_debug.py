@@ -4,6 +4,7 @@ import time
 
 from src.runner import load_yaml
 from src.tcp_telemetry_client import TcpTelemetryClient
+from src.protocols import encode_hex_source
 
 
 ENV_CONFIG_PATH = "config/env.yaml"
@@ -22,31 +23,70 @@ def parse_payload(value: str):
         return value
 
 
-def build_client(args) -> TcpTelemetryClient:
+def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClient:
     env_config = load_yaml(args.env)
     tcp_config = env_config.get("tcp", {})
-
-    host = args.host or tcp_config.get("host", "127.0.0.1")
-    port = int(args.port or tcp_config.get("port", 502))
-    tm_codes = parse_tm_codes(args.tm_codes) or tcp_config.get(
-        "telemetry_poll_codes",
-        [],
+    selected_config = (
+        env_config.get("telecommand", {})
+        if use_telecommand_config
+        else tcp_config
     )
+
+    host = args.host or selected_config.get("host", tcp_config.get("host", "127.0.0.1"))
+    port = int(args.port or selected_config.get("port", tcp_config.get("port", 502)))
+    tm_codes = parse_tm_codes(args.tm_codes) or selected_config.get(
+        "telemetry_poll_codes",
+        tcp_config.get("telemetry_poll_codes", []),
+    )
+    frame_field_codes = selected_config.get(
+        "telemetry_frame_field_codes",
+        tcp_config.get("telemetry_frame_field_codes"),
+    )
+    timeout_sec = float(
+        selected_config.get("timeout_sec", tcp_config.get("timeout_sec", 2.0))
+    )
+    recv_buffer_size = int(
+        selected_config.get(
+            "recv_buffer_size",
+            tcp_config.get("recv_buffer_size", 4096),
+        )
+    )
+    connect_retry_timeout_sec = float(
+        selected_config.get(
+            "connect_retry_timeout_sec",
+            tcp_config.get("connect_retry_timeout_sec", 20.0),
+        )
+    )
+    connect_retry_interval_sec = float(
+        selected_config.get(
+            "connect_retry_interval_sec",
+            tcp_config.get("connect_retry_interval_sec", 0.5),
+        )
+    )
+    poll_interval_sec = float(
+        selected_config.get(
+            "poll_interval_sec",
+            tcp_config.get("poll_interval_sec", args.interval),
+        )
+    )
+    heartbeat_interval_sec = selected_config.get(
+        "heartbeat_interval_sec",
+        tcp_config.get("heartbeat_interval_sec"),
+    )
+    if heartbeat_interval_sec is not None:
+        heartbeat_interval_sec = float(heartbeat_interval_sec)
 
     return TcpTelemetryClient(
         host=host,
         port=port,
-        timeout_sec=float(tcp_config.get("timeout_sec", 2.0)),
-        recv_buffer_size=int(tcp_config.get("recv_buffer_size", 4096)),
-        connect_retry_timeout_sec=float(
-            tcp_config.get("connect_retry_timeout_sec", 20.0)
-        ),
-        connect_retry_interval_sec=float(
-            tcp_config.get("connect_retry_interval_sec", 0.5)
-        ),
+        timeout_sec=timeout_sec,
+        recv_buffer_size=recv_buffer_size,
+        connect_retry_timeout_sec=connect_retry_timeout_sec,
+        connect_retry_interval_sec=connect_retry_interval_sec,
         telemetry_poll_codes=tm_codes,
-        telemetry_frame_field_codes=tcp_config.get("telemetry_frame_field_codes"),
-        poll_interval_sec=args.interval,
+        telemetry_frame_field_codes=frame_field_codes,
+        poll_interval_sec=poll_interval_sec,
+        heartbeat_interval_sec=heartbeat_interval_sec,
     )
 
 
@@ -74,8 +114,10 @@ def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
         print(
             "frame "
             f"t={frame.timestamp_sec:.3f}s "
+            f"angle={frame.attitude_angle_deg} "
             f"rate={frame.angular_rate_deg_s} "
-            f"mode={frame.control_mode}"
+            f"mode={frame.control_mode} "
+            f"attitude_reference={frame.attitude_reference}"
         )
         print_json(frame.raw)
 
@@ -119,6 +161,11 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--payload", help="JSON or raw text payload for send.")
     parser.add_argument(
+        "--hex",
+        action="store_true",
+        help="Treat --payload as hex source and send binary bytes.",
+    )
+    parser.add_argument(
         "--no-response",
         action="store_true",
         help="Do not wait for a TCP response after send.",
@@ -130,7 +177,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    client = build_client(args)
+    client = build_client(args, use_telecommand_config=args.command == "send")
 
     if args.command == "ping":
         run_ping(client)
@@ -150,9 +197,10 @@ def main() -> None:
     elif args.command == "send":
         if args.payload is None:
             parser.error("--payload is required for send")
+        payload = encode_hex_source(args.payload) if args.hex else parse_payload(args.payload)
         run_send(
             client=client,
-            payload=parse_payload(args.payload),
+            payload=payload,
             expect_response=not args.no_response,
             append_newline=not args.no_newline,
         )

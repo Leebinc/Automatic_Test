@@ -1,5 +1,5 @@
-- case_id: "case_001_udp_demo"
-  description: "第一轮半实物仿真：期望三轴角速度收敛并进入稳定模式"
+- case_id: "case_001"
+  description: "第一轮半实物仿真：阳照初期"
   initial_condition:
     orbit:
       semi_major_axis_m: 6871000
@@ -8,11 +8,11 @@
       raan_deg: 0.0
       arg_perigee_deg: 0.0
       mean_anomaly_deg: 0.0
-    year: 2025
+    year: 2026
     date_time:
       month: 6
-      date: 1
-      hour: 12
+      date: 26
+      hour: 0
       minute: 0
       second: 0
     attitude:
@@ -41,10 +41,11 @@
       
   expected:
     final_control_mode: "STABLE"
-    angular_rate_converged: true
+    final_attitude_reference: "SUN"
+    attitude_angle_converged: true
 
-- case_id: "case_002_not_converged"
-  description: "第二轮半实物仿真：模拟最终未收敛的失败场景"
+- case_id: "case_002"
+  description: "第二轮半实物仿真：阴影初期"
   initial_condition:
     orbit:
       semi_major_axis_m: 6871000
@@ -53,11 +54,11 @@
       raan_deg: 0.0
       arg_perigee_deg: 0.0
       mean_anomaly_deg: 0.0
-    year: 2025
+    year: 2026
     date_time:
       month: 6
-      date: 1
-      hour: 12
+      date: 26
+      hour: 0
       minute: 0
       second: 0
     attitude:
@@ -85,4 +86,5 @@
       Initial_orbit_standard: 1
   expected:
     final_control_mode: "STABLE"
-    angular_rate_converged: true
+    final_attitude_reference: "SUN"
+    attitude_angle_converged: true
