@@ -5,6 +5,9 @@ def is_angular_rate_below_threshold(
     frame: TelemetryFrame,
     threshold_deg_s: float,
 ) -> bool:
+    if frame.angular_rate_deg_s is None or len(frame.angular_rate_deg_s) != 3:
+        return False
+
     wx, wy, wz = frame.angular_rate_deg_s
     return (
         abs(wx) <= threshold_deg_s

@@ -293,7 +293,7 @@ def decode_telemetry_response_frame(
         field_codes=field_codes.get("attitude_angle_deg", []),
         axis_names=("roll", "pitch", "yaw"),
     )
-    angular_rate_deg_s = _three_axis_values(
+    angular_rate_deg_s = _optional_three_axis_values(
         by_code=by_code,
         field_codes=field_codes.get("angular_rate_deg_s", []),
         axis_names=("x", "y", "z"),
@@ -334,6 +334,42 @@ def _three_axis_values(
         values.append(float(item.value))
 
     return values
+
+
+def _optional_three_axis_values(
+    by_code: dict[str, TelemetryParameter],
+    field_codes,
+    axis_names: tuple[str, str, str],
+) -> list[float] | None:
+    if not field_codes:
+        return None
+
+    if isinstance(field_codes, dict):
+        field_codes = [field_codes.get(axis) for axis in axis_names]
+
+    configured_codes = list(field_codes or [])[:3]
+    if len(configured_codes) != 3 or any(code is None for code in configured_codes):
+        raise ValueError(
+            f"three telemetry codes must be configured for optional axes "
+            f"{axis_names}: {configured_codes!r}"
+        )
+
+    items = [by_code.get(str(tm_code)) for tm_code in configured_codes]
+    present_count = sum(item is not None for item in items)
+    if present_count == 0:
+        return None
+    if present_count != 3:
+        missing_codes = [
+            tm_code
+            for tm_code, item in zip(configured_codes, items)
+            if item is None
+        ]
+        raise ValueError(
+            f"telemetry response contains only part of the optional three-axis "
+            f"data; missing codes: {missing_codes}"
+        )
+
+    return [float(item.value) for item in items]
 
 
 def _optional_int(value) -> int | None:

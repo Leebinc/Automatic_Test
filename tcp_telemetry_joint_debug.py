@@ -4,7 +4,7 @@ import time
 
 from src.runner import load_yaml
 from src.tcp_telemetry_client import TcpTelemetryClient
-from src.protocols import encode_hex_source
+from src.protocols import decode_telemetry_response_parameters, encode_hex_source
 
 
 ENV_CONFIG_PATH = "config/env.yaml"
@@ -75,6 +75,14 @@ def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClie
     )
     if heartbeat_interval_sec is not None:
         heartbeat_interval_sec = float(heartbeat_interval_sec)
+    idle_disconnect_sec = float(
+        args.idle_timeout
+        if args.idle_timeout is not None
+        else selected_config.get(
+            "idle_disconnect_sec",
+            tcp_config.get("idle_disconnect_sec", 10.0),
+        )
+    )
 
     return TcpTelemetryClient(
         host=host,
@@ -87,6 +95,7 @@ def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClie
         telemetry_frame_field_codes=frame_field_codes,
         poll_interval_sec=poll_interval_sec,
         heartbeat_interval_sec=heartbeat_interval_sec,
+        idle_disconnect_sec=idle_disconnect_sec,
     )
 
 
@@ -94,18 +103,55 @@ def print_json(payload) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def run_request_and_wait(client: TcpTelemetryClient, command: dict, print_response) -> None:
+    with client.open_connection() as sock:
+        print(f"connected to {client.host}:{client.port}")
+        client.send_command_on_connection(sock, command)
+        print(
+            f"request sent; connection remains open while waiting up to "
+            f"{client.idle_disconnect_sec:.3f}s without incoming data"
+        )
+        close_reason, response_count = client.receive_responses_until_idle(
+            sock,
+            on_response=print_response,
+        )
+
+    if response_count == 0:
+        print("no response received; this is allowed for a receive-only peer")
+    print(close_reason)
+
+
 def run_ping(client: TcpTelemetryClient) -> None:
-    print_json(client.ping())
+    run_request_and_wait(
+        client=client,
+        command={"cmd": "ping"},
+        print_response=print_json,
+    )
 
 
 def run_get(client: TcpTelemetryClient, tm_code: str) -> None:
-    parameter = client.get_parameter(tm_code)
-    print_json(parameter.raw if parameter is not None else None)
+    def print_get_response(response: dict) -> None:
+        parameters = decode_telemetry_response_parameters(response)
+        parameter = parameters[0] if parameters else None
+        print_json(parameter.raw if parameter is not None else None)
+
+    run_request_and_wait(
+        client=client,
+        command={"cmd": "get", "tmCode": tm_code},
+        print_response=print_get_response,
+    )
 
 
 def run_list(client: TcpTelemetryClient, tm_codes: list[str]) -> None:
-    parameters = client.list_parameters(tm_codes)
-    print_json([item.raw for item in parameters])
+    def print_list_response(response: dict) -> None:
+        parameters = decode_telemetry_response_parameters(response)
+        print_json([item.raw for item in parameters])
+
+    run_request_and_wait(
+        client=client,
+        command={"cmd": "list", "tmCodes": tm_codes},
+        print_response=print_list_response,
+    )
 
 
 def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
@@ -140,13 +186,81 @@ def run_send(
         print_json(response)
 
 
+def prepare_telecommand_sequence(telecommand_config: dict) -> list[tuple[str, bytes]]:
+    sequence = telecommand_config.get("sequence", [])
+    if not isinstance(sequence, list) or not sequence:
+        raise ValueError("telecommand.sequence must be a non-empty list")
+
+    prepared = []
+    for index, item in enumerate(sequence, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"telecommand sequence item {index} must be a mapping: {item!r}"
+            )
+
+        name = str(item.get("name", f"command_{index}"))
+        hex_source = item.get("hex")
+        if not hex_source:
+            raise ValueError(f"telecommand {name} is missing hex source")
+
+        prepared.append((name, encode_hex_source(str(hex_source))))
+
+    return prepared
+
+
+def run_send_sequence(
+    client: TcpTelemetryClient,
+    telecommand_config: dict,
+) -> None:
+    prepared = prepare_telecommand_sequence(telecommand_config)
+    initial_delay_sec = float(telecommand_config.get("initial_delay_sec", 0.0))
+    interval_sec = float(telecommand_config.get("interval_sec", 0.1))
+    post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
+    append_newline = bool(telecommand_config.get("append_newline", False))
+
+    with client.open_connection() as sock:
+        print(f"connected to {client.host}:{client.port}")
+        print(
+            f"loaded {len(prepared)} telecommands; "
+            f"interval={interval_sec:.3f}s, append_newline={append_newline}"
+        )
+
+        if initial_delay_sec > 0:
+            time.sleep(initial_delay_sec)
+
+        for index, (name, payload) in enumerate(prepared, start=1):
+            if index > 1 and interval_sec > 0:
+                time.sleep(interval_sec)
+
+            byte_count = client.send_payload_on_connection(
+                sock=sock,
+                payload=payload,
+                append_newline=append_newline,
+            )
+            print(
+                f"sent telecommand {index}/{len(prepared)}: "
+                f"name={name}, bytes={byte_count}"
+            )
+
+        if post_delay_sec > 0:
+            time.sleep(post_delay_sec)
+
+        print(
+            f"all {len(prepared)} telecommands sent; connection remains open "
+            f"until server close or {client.idle_disconnect_sec:.3f}s idle timeout"
+        )
+        close_reason = client.wait_for_idle_disconnect(sock)
+
+    print(close_reason)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Joint-debug tool for the JSON TCP telemetry protocol."
+        description="Joint-debug tool for TCP telemetry and binary telecommands."
     )
     parser.add_argument(
         "command",
-        choices=("ping", "get", "list", "poll", "send"),
+        choices=("ping", "get", "list", "poll", "send", "send-sequence"),
         help="TCP telemetry command to run.",
     )
     parser.add_argument("--env", default=ENV_CONFIG_PATH)
@@ -159,6 +273,15 @@ def main() -> None:
     )
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--interval", type=float, default=0.5)
+    parser.add_argument(
+        "--idle-timeout",
+        type=float,
+        help=(
+            "Seconds to keep ping/get/list/send-sequence connections open while idle; "
+            "the timer resets whenever data is received and defaults to "
+            "tcp.idle_disconnect_sec."
+        ),
+    )
     parser.add_argument("--payload", help="JSON or raw text payload for send.")
     parser.add_argument(
         "--hex",
@@ -177,7 +300,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    client = build_client(args, use_telecommand_config=args.command == "send")
+    client = build_client(
+        args,
+        use_telecommand_config=args.command in {"send", "send-sequence"},
+    )
 
     if args.command == "ping":
         run_ping(client)
@@ -203,6 +329,12 @@ def main() -> None:
             payload=payload,
             expect_response=not args.no_response,
             append_newline=not args.no_newline,
+        )
+    elif args.command == "send-sequence":
+        env_config = load_yaml(args.env)
+        run_send_sequence(
+            client=client,
+            telecommand_config=env_config.get("telecommand", {}),
         )
 
 

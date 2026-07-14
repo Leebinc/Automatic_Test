@@ -18,7 +18,7 @@ def make_frame(
         case_id="unit_case",
         timestamp_sec=timestamp_sec,
         attitude_angle_deg=attitude_angle_deg,
-        angular_rate_deg_s=angular_rate_deg_s or [0.0, 0.0, 0.0],
+        angular_rate_deg_s=angular_rate_deg_s,
         control_mode="STABLE",
         attitude_reference=attitude_reference,
         sim_status="RUNNING",
@@ -81,6 +81,12 @@ def test_angular_rate_interface_is_retained():
         threshold_deg_s=0.05,
         hold_sec=60.0,
     )
+
+
+def test_missing_optional_angular_rate_does_not_converge():
+    frame = make_frame(0.0, [0.0, 0.0, 0.0], angular_rate_deg_s=None)
+
+    assert not is_angular_rate_below_threshold(frame, threshold_deg_s=0.05)
 
 
 def test_final_attitude_reference():

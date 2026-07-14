@@ -33,7 +33,7 @@ class TelemetryFrame:
     case_id: str
     timestamp_sec: float
     attitude_angle_deg: list[float]
-    angular_rate_deg_s: list[float]
+    angular_rate_deg_s: list[float] | None
     control_mode: str
     attitude_reference: str
     sim_status: str
