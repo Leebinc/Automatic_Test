@@ -1,10 +1,13 @@
+import pytest
+
 from src.models import TelemetryFrame
-from src.validators import (
-    final_attitude_reference_is,
+from tests.validators import (
+    assert_attitude_reference_matches,
+    assert_control_mode_matches,
+    has_attitude_converged_for_hold_time,
     has_converged_for_hold_time,
     is_angular_rate_below_threshold,
     is_attitude_angle_below_threshold,
-    has_attitude_converged_for_hold_time,
 )
 
 
@@ -12,14 +15,15 @@ def make_frame(
     timestamp_sec: float,
     attitude_angle_deg: list[float],
     angular_rate_deg_s: list[float] | None = None,
-    attitude_reference: str = "SUN",
+    control_mode: str = "3",
+    attitude_reference: str = "3",
 ) -> TelemetryFrame:
     return TelemetryFrame(
         case_id="unit_case",
         timestamp_sec=timestamp_sec,
         attitude_angle_deg=attitude_angle_deg,
         angular_rate_deg_s=angular_rate_deg_s,
-        control_mode="STABLE",
+        control_mode=control_mode,
         attitude_reference=attitude_reference,
         sim_status="RUNNING",
         raw={},
@@ -89,10 +93,29 @@ def test_missing_optional_angular_rate_does_not_converge():
     assert not is_angular_rate_below_threshold(frame, threshold_deg_s=0.05)
 
 
-def test_final_attitude_reference():
+def test_control_mode_mismatch_at_any_frame_raises_immediately():
     frames = [
-        make_frame(0.0, [0.0, 0.0, 0.0], attitude_reference="EARTH"),
-        make_frame(2.0, [0.0, 0.0, 0.0], attitude_reference="SUN"),
+        make_frame(0.0, [0.0, 0.0, 0.0], control_mode="3"),
+        make_frame(2.0, [0.0, 0.0, 0.0], control_mode="2"),
+        make_frame(4.0, [0.0, 0.0, 0.0], control_mode="3"),
     ]
 
-    assert final_attitude_reference_is(frames, expected_reference="SUN")
+    with pytest.raises(AssertionError, match="control mode mismatch"):
+        for frame in frames:
+            assert_control_mode_matches(frame, expected_mode="3", case_id="case")
+
+
+def test_attitude_reference_mismatch_at_any_frame_raises_immediately():
+    frames = [
+        make_frame(0.0, [0.0, 0.0, 0.0], attitude_reference="3"),
+        make_frame(2.0, [0.0, 0.0, 0.0], attitude_reference="1"),
+        make_frame(4.0, [0.0, 0.0, 0.0], attitude_reference="3"),
+    ]
+
+    with pytest.raises(AssertionError, match="attitude reference mismatch"):
+        for frame in frames:
+            assert_attitude_reference_matches(
+                frame,
+                expected_reference="3",
+                case_id="case",
+            )

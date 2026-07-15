@@ -40,12 +40,10 @@ def has_angular_rate_converged_for_hold_time(
         return False
 
     valid_start_time = None
-
     for frame in frames:
         if is_angular_rate_below_threshold(frame, threshold_deg_s):
             if valid_start_time is None:
                 valid_start_time = frame.timestamp_sec
-
             if frame.timestamp_sec - valid_start_time >= hold_sec:
                 return True
         else:
@@ -72,19 +70,14 @@ def has_attitude_converged_for_hold_time(
     threshold_deg: float,
     hold_sec: float,
 ) -> bool:
-    """
-    判断三轴姿态角绝对值是否连续 hold_sec 时间保持在阈值内。
-    """
     if not frames:
         return False
 
     valid_start_time = None
-
     for frame in frames:
         if is_attitude_angle_below_threshold(frame, threshold_deg):
             if valid_start_time is None:
                 valid_start_time = frame.timestamp_sec
-
             if frame.timestamp_sec - valid_start_time >= hold_sec:
                 return True
         else:
@@ -93,21 +86,33 @@ def has_attitude_converged_for_hold_time(
     return False
 
 
-def final_control_mode_is(
-    frames: list[TelemetryFrame],
-    expected_mode: str,
-) -> bool:
-    if not frames:
-        return False
+def assert_control_mode_matches(
+    frame: TelemetryFrame,
+    expected_mode,
+    case_id: str,
+) -> None:
+    expected_engineering_value = str(expected_mode)
+    actual_engineering_value = str(frame.control_mode)
+    if actual_engineering_value != expected_engineering_value:
+        raise AssertionError(
+            f"{case_id} control mode mismatch; "
+            f"expected_engineering_value={expected_engineering_value}, "
+            f"actual_engineering_value={actual_engineering_value}, "
+            f"t={frame.timestamp_sec:.3f}s"
+        )
 
-    return frames[-1].control_mode == expected_mode
 
-
-def final_attitude_reference_is(
-    frames: list[TelemetryFrame],
-    expected_reference: str,
-) -> bool:
-    if not frames:
-        return False
-
-    return frames[-1].attitude_reference == expected_reference
+def assert_attitude_reference_matches(
+    frame: TelemetryFrame,
+    expected_reference,
+    case_id: str,
+) -> None:
+    expected_engineering_value = str(expected_reference)
+    actual_engineering_value = str(frame.attitude_reference)
+    if actual_engineering_value != expected_engineering_value:
+        raise AssertionError(
+            f"{case_id} attitude reference mismatch; "
+            f"expected_engineering_value={expected_engineering_value}, "
+            f"actual_engineering_value={actual_engineering_value}, "
+            f"t={frame.timestamp_sec:.3f}s"
+        )

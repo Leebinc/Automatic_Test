@@ -128,12 +128,16 @@ class TcpTelemetryClient:
         self,
         sock: socket.socket,
         on_response,
+        stop_event=None,
     ) -> tuple[str, int]:
         """Receive optional JSON responses until interrupted or peer close."""
         buffer = self._receive_buffer if sock is self._socket else b""
         response_count = 0
 
         while True:
+            if stop_event is not None and stop_event.is_set():
+                return "client receive loop stopped", response_count
+
             sock.settimeout(min(max(self.timeout_sec, 0.1), 1.0))
             try:
                 data = sock.recv(self.recv_buffer_size)
@@ -269,31 +273,37 @@ class TcpTelemetryClient:
             else None
         )
         last_heartbeat_time = start_time
+        next_poll_time = start_time
+        poll_interval_sec = max(self.poll_interval_sec, 0.01)
 
         while True:
             now = time.monotonic()
             if operation_deadline is not None and now >= operation_deadline:
                 return
 
-            try:
-                if self._heartbeat_due(now, last_heartbeat_time):
-                    self._send_command(sock, {"cmd": "ping"})
-                    response, self._receive_buffer = self._receive_response(
-                        sock,
-                        self._receive_buffer,
-                        deadline=operation_deadline,
-                    )
-                    self._validate_heartbeat_response(response)
-                    last_heartbeat_time = now
+            if self._heartbeat_due(now, last_heartbeat_time):
+                self._send_command(sock, {"cmd": "ping"})
+                last_heartbeat_time = now
 
+            if now >= next_poll_time:
                 self._send_command(sock, command)
-                response, self._receive_buffer = self._receive_response(
-                    sock,
-                    self._receive_buffer,
-                    deadline=operation_deadline,
-                )
-            except TimeoutError:
-                return
+                next_poll_time = now + poll_interval_sec
+
+            receive_deadline = next_poll_time
+            if operation_deadline is not None:
+                receive_deadline = min(receive_deadline, operation_deadline)
+
+            response, self._receive_buffer = self._receive_response_until(
+                sock,
+                self._receive_buffer,
+                deadline=receive_deadline,
+            )
+            if response is None:
+                continue
+
+            if self._is_heartbeat_response(response):
+                self._validate_heartbeat_response(response)
+                continue
 
             frame = decode_telemetry_response_frame(
                 response=response,
@@ -303,8 +313,6 @@ class TcpTelemetryClient:
             # spacecraft/system telemetry time.
             frame.timestamp_sec = time.monotonic() - start_time
             yield frame
-
-            time.sleep(self.poll_interval_sec)
 
     def _heartbeat_due(self, now: float, last_heartbeat_time: float) -> bool:
         return (
@@ -320,6 +328,13 @@ class TcpTelemetryClient:
                 f"TCP telemetry heartbeat failed: "
                 f"code={code}, msg={response.get('msg', '')}"
             )
+
+    def _is_heartbeat_response(self, response: dict) -> bool:
+        return (
+            int(response.get("code", -1)) == 0
+            and str(response.get("msg", "")).lower() == "pong"
+            and response.get("data") in (None, [], {})
+        )
 
     def _send_command(self, sock: socket.socket, command: dict) -> None:
         try:
@@ -363,3 +378,44 @@ class TcpTelemetryClient:
             return self._receive_response(sock, buffer, deadline=deadline)
 
         return decode_tcp_json_response(line), buffer
+
+    def _receive_response_until(
+        self,
+        sock: socket.socket,
+        buffer: bytes,
+        deadline: float,
+    ) -> tuple[dict | None, bytes]:
+        """Receive one optional response without blocking the next poll send."""
+        while True:
+            if b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                return decode_tcp_json_response(line), buffer
+
+            if buffer.strip():
+                try:
+                    response = decode_tcp_json_response(buffer.strip())
+                except (ValueError, UnicodeError):
+                    pass
+                else:
+                    return response, b""
+
+            remaining_sec = deadline - time.monotonic()
+            if remaining_sec <= 0:
+                return None, buffer
+
+            sock.settimeout(min(max(self.timeout_sec, 0.1), remaining_sec))
+            try:
+                data = sock.recv(self.recv_buffer_size)
+            except socket.timeout:
+                continue
+            except OSError:
+                self._mark_disconnected(sock)
+                raise
+
+            if not data:
+                self._mark_disconnected(sock)
+                raise ConnectionError("TCP telemetry server closed the connection")
+            buffer += data

@@ -1,10 +1,11 @@
 import argparse
 import json
+import threading
 import time
 
 from src.runner import load_yaml
 from src.tcp_telemetry_client import TcpTelemetryClient
-from src.protocols import decode_telemetry_response_parameters, encode_hex_source
+from src.protocols import encode_hex_source
 
 
 ENV_CONFIG_PATH = "config/env.yaml"
@@ -93,48 +94,92 @@ def print_json(payload) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def run_request_and_wait(client: TcpTelemetryClient, command: dict, print_response) -> None:
+def parse_interactive_request(value: str) -> dict:
+    parts = value.strip().split(maxsplit=1)
+    command = parts[0].lower() if parts else ""
+    argument = parts[1].strip() if len(parts) > 1 else ""
+
+    if command == "ping":
+        return {"cmd": "ping"}
+    if command == "get" and argument:
+        return {"cmd": "get", "tmCode": argument}
+    if command == "list":
+        tm_codes = parse_tm_codes(argument)
+        if tm_codes:
+            return {"cmd": "list", "tmCodes": tm_codes}
+
+    raise ValueError("use: ping | get TM_CODE | list CODE1,CODE2")
+
+
+def run_request_and_wait(client: TcpTelemetryClient, command: dict) -> None:
     sock = client.open_connection()
     print(f"connected to {client.host}:{client.port}")
     client.send_command_on_connection(sock, command)
-    print("request sent; connection will remain open until Ctrl+C or server close")
-    close_reason, _ = client.receive_responses_until_closed(
-        sock,
-        on_response=print_response,
+    print("initial request sent; the same connection remains available for more requests")
+    print("commands: ping | get TM_CODE | list CODE1,CODE2 | help | quit")
+
+    stop_event = threading.Event()
+
+    def receive_worker() -> None:
+        close_reason, _ = client.receive_responses_until_closed(
+            sock,
+            on_response=print_json,
+            stop_event=stop_event,
+        )
+        if not stop_event.is_set():
+            print(f"\n{close_reason}")
+        stop_event.set()
+
+    receiver = threading.Thread(
+        target=receive_worker,
+        name="tcp-joint-debug-receiver",
+        daemon=True,
     )
-    print(close_reason)
+    receiver.start()
+
+    try:
+        while not stop_event.is_set():
+            try:
+                value = input("tcp> ").strip()
+            except EOFError:
+                break
+
+            if not value:
+                continue
+            if value.lower() in {"quit", "exit"}:
+                break
+            if value.lower() == "help":
+                print("commands: ping | get TM_CODE | list CODE1,CODE2 | help | quit")
+                continue
+
+            try:
+                next_command = parse_interactive_request(value)
+            except ValueError as exc:
+                print(exc)
+                continue
+
+            client.send_command_on_connection(sock, next_command)
+            print(f"sent: {json.dumps(next_command, ensure_ascii=False)}")
+    finally:
+        stop_event.set()
+        receiver.join(timeout=2.0)
 
 
 def run_ping(client: TcpTelemetryClient) -> None:
-    run_request_and_wait(
-        client=client,
-        command={"cmd": "ping"},
-        print_response=print_json,
-    )
+    run_request_and_wait(client=client, command={"cmd": "ping"})
 
 
 def run_get(client: TcpTelemetryClient, tm_code: str) -> None:
-    def print_get_response(response: dict) -> None:
-        parameters = decode_telemetry_response_parameters(response)
-        parameter = parameters[0] if parameters else None
-        print_json(parameter.raw if parameter is not None else None)
-
     run_request_and_wait(
         client=client,
         command={"cmd": "get", "tmCode": tm_code},
-        print_response=print_get_response,
     )
 
 
 def run_list(client: TcpTelemetryClient, tm_codes: list[str]) -> None:
-    def print_list_response(response: dict) -> None:
-        parameters = decode_telemetry_response_parameters(response)
-        print_json([item.raw for item in parameters])
-
     run_request_and_wait(
         client=client,
         command={"cmd": "list", "tmCodes": tm_codes},
-        print_response=print_list_response,
     )
 
 

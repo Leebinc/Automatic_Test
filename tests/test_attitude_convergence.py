@@ -1,9 +1,9 @@
 import pytest
 
 from src.runner import SimulationRunner, load_cases, load_yaml
-from src.validators import (
-    final_attitude_reference_is,
-    final_control_mode_is,
+from tests.validators import (
+    assert_attitude_reference_matches,
+    assert_control_mode_matches,
     has_attitude_converged_for_hold_time,
 )
 
@@ -44,26 +44,33 @@ def test_attitude_angle_convergence_control_mode_and_reference(
     validation_config,
     sim_case,
 ):
-    frames = runner.run_once(sim_case)
-
-    assert frames, f"{sim_case.case_id} did not receive any telemetry frames"
-
     threshold = float(validation_config["attitude_angle_threshold_deg"])
     hold_sec = float(validation_config["convergence_hold_sec"])
+    frames = []
+    converged = False
 
-    converged = has_attitude_converged_for_hold_time(
-        frames=frames,
-        threshold_deg=threshold,
-        hold_sec=hold_sec,
-    )
-    mode_ok = final_control_mode_is(
-        frames=frames,
-        expected_mode=sim_case.expected.final_control_mode,
-    )
-    attitude_reference_ok = final_attitude_reference_is(
-        frames=frames,
-        expected_reference=sim_case.expected.final_attitude_reference,
-    )
+    for frame in runner.iter_frames(sim_case):
+        frames.append(frame)
+
+        assert_control_mode_matches(
+            frame=frame,
+            expected_mode=sim_case.expected.control_mode,
+            case_id=sim_case.case_id,
+        )
+        assert_attitude_reference_matches(
+            frame=frame,
+            expected_reference=sim_case.expected.attitude_reference,
+            case_id=sim_case.case_id,
+        )
+
+        if not converged:
+            converged = has_attitude_converged_for_hold_time(
+                frames=frames,
+                threshold_deg=threshold,
+                hold_sec=hold_sec,
+            )
+
+    assert frames, f"{sim_case.case_id} did not receive any telemetry frames"
 
     assert converged == sim_case.expected.attitude_angle_converged, (
         f"{sim_case.case_id} attitude-angle convergence result mismatch; "
@@ -71,14 +78,4 @@ def test_attitude_angle_convergence_control_mode_and_reference(
         f"actual={converged}, "
         f"last_angle={frames[-1].attitude_angle_deg}, "
         f"last_rate={frames[-1].angular_rate_deg_s}"
-    )
-    assert mode_ok, (
-        f"{sim_case.case_id} control mode mismatch; "
-        f"expected={sim_case.expected.final_control_mode}, "
-        f"actual={frames[-1].control_mode}"
-    )
-    assert attitude_reference_ok, (
-        f"{sim_case.case_id} attitude reference mismatch; "
-        f"expected={sim_case.expected.final_attitude_reference}, "
-        f"actual={frames[-1].attitude_reference}"
     )

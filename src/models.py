@@ -14,9 +14,9 @@ class InitialCondition:
 
 @dataclass
 class ExpectedResult:
-    final_control_mode: str
+    control_mode: str
     attitude_angle_converged: bool
-    final_attitude_reference: str
+    attitude_reference: str
 
 
 @dataclass

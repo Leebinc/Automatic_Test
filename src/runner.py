@@ -6,7 +6,6 @@ from src.models import ExpectedResult, InitialCondition, SimulationCase
 from src.protocols import encode_hex_source, encode_time_sync_hex_source
 from src.tcp_telemetry_client import TcpTelemetryClient
 from src.udp_client import UdpInitialConditionClient
-from src.validators import is_attitude_angle_below_threshold
 
 
 def load_yaml(path: str):
@@ -47,7 +46,6 @@ class SimulationRunner:
         udp_config = env_config["udp"]
         tcp_config = env_config["tcp"]
         simulation_config = env_config.get("simulation", {})
-        validation_config = env_config.get("validation", {})
         self.telecommand_config = env_config.get("telecommand", {})
 
         self.udp_client = UdpInitialConditionClient(
@@ -111,29 +109,9 @@ class SimulationRunner:
         self.reset_sequence_delay_sec = float(
             simulation_config.get("reset_sequence_delay_sec", 3.0)
         )
-        self.attitude_angle_threshold_deg = float(
-            validation_config.get("attitude_angle_threshold_deg", 0.5)
-        )
-        self.convergence_hold_sec = float(
-            validation_config.get("convergence_hold_sec", 5.0)
-        )
-        self.stop_when_converged = _bool_config(
-            validation_config.get("stop_when_converged", True)
-        )
-        self.fail_fast_control_mode = _bool_config(
-            validation_config.get("fail_fast_control_mode", True)
-        )
-        self.mode_check_grace_sec = float(
-            validation_config.get("mode_check_grace_sec", 0.0)
-        )
-        self.fail_fast_attitude_reference = _bool_config(
-            validation_config.get("fail_fast_attitude_reference", True)
-        )
-        self.attitude_reference_check_grace_sec = float(
-            validation_config.get("attitude_reference_check_grace_sec", 0.0)
-        )
 
-    def run_once(self, sim_case: SimulationCase):
+    def iter_frames(self, sim_case: SimulationCase):
+        """Prepare one case and yield telemetry frames without judging them."""
         reset_clear_payload = self.udp_client.send_initial_condition(
             sim_case.initial_condition,
             reset=False,
@@ -162,53 +140,12 @@ class SimulationRunner:
         if self.post_udp_delay_sec > 0:
             time.sleep(self.post_udp_delay_sec)
 
-        frames = []
-        start_time = time.monotonic()
-        convergence_start_sec = None
-        converged = False
+        yield from self._receive_frames()
 
-        for frame in self._receive_frames():
-            frames.append(frame)
-            elapsed_sec = time.monotonic() - start_time
-
-            self._assert_control_mode_if_needed(
-                sim_case=sim_case,
-                frame=frame,
-                elapsed_sec=elapsed_sec,
-            )
-            self._assert_attitude_reference_if_needed(
-                sim_case=sim_case,
-                frame=frame,
-                elapsed_sec=elapsed_sec,
-            )
-
-            frame_time_sec = frame.timestamp_sec if frame.timestamp_sec > 0 else elapsed_sec
-            if is_attitude_angle_below_threshold(
-                frame=frame,
-                threshold_deg=self.attitude_angle_threshold_deg,
-            ):
-                if convergence_start_sec is None:
-                    convergence_start_sec = frame_time_sec
-
-                if frame_time_sec - convergence_start_sec >= self.convergence_hold_sec:
-                    converged = True
-                    if self.stop_when_converged:
-                        print(
-                            f"stop receiving telemetry because attitude angle "
-                            f"converged for {self.convergence_hold_sec}s"
-                        )
-                        break
-            else:
-                convergence_start_sec = None
-
-            if elapsed_sec >= self.max_duration_sec:
-                print(
-                    f"stop receiving telemetry because max_duration_sec "
-                    f"was reached: {self.max_duration_sec}s"
-                )
-                break
-
-        print(f"received telemetry frames: {len(frames)}, converged={converged}")
+    def run_once(self, sim_case: SimulationCase):
+        """Compatibility helper that collects frames without judging them."""
+        frames = list(self.iter_frames(sim_case))
+        print(f"received telemetry frames: {len(frames)}")
         return frames
 
     def _send_telecommand_if_configured(self, sim_case: SimulationCase) -> bool:
@@ -346,56 +283,6 @@ class SimulationRunner:
             config["payload"] = case_telecommand
 
         return config
-
-    def _assert_control_mode_if_needed(
-        self,
-        sim_case: SimulationCase,
-        frame,
-        elapsed_sec: float,
-    ) -> None:
-        if not self.fail_fast_control_mode:
-            return
-
-        if elapsed_sec < self.mode_check_grace_sec:
-            return
-
-        expected_mode = sim_case.expected.final_control_mode
-        if not expected_mode:
-            return
-
-        if frame.control_mode != expected_mode:
-            raise AssertionError(
-                f"{sim_case.case_id} control mode mismatch during telemetry; "
-                f"expected={expected_mode}, actual={frame.control_mode}, "
-                f"t={frame.timestamp_sec:.3f}s, "
-                f"rate={frame.angular_rate_deg_s}"
-            )
-
-    def _assert_attitude_reference_if_needed(
-        self,
-        sim_case: SimulationCase,
-        frame,
-        elapsed_sec: float,
-    ) -> None:
-        if not self.fail_fast_attitude_reference:
-            return
-
-        if elapsed_sec < self.attitude_reference_check_grace_sec:
-            return
-
-        expected_reference = sim_case.expected.final_attitude_reference
-        if not expected_reference:
-            return
-
-        if frame.attitude_reference != expected_reference:
-            raise AssertionError(
-                f"{sim_case.case_id} attitude reference mismatch during telemetry; "
-                f"expected={expected_reference}, "
-                f"actual={frame.attitude_reference}, "
-                f"t={frame.timestamp_sec:.3f}s, "
-                f"angle={frame.attitude_angle_deg}, "
-                f"rate={frame.angular_rate_deg_s}"
-            )
 
     def _receive_frames(self):
         yield from self.tcp_client.receive_frames(

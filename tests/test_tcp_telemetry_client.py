@@ -94,6 +94,30 @@ def test_multiple_requests_share_one_persistent_connection():
         server_sock.close()
 
 
+def test_polling_resends_requests_when_server_does_not_respond():
+    client = TcpTelemetryClient(
+        host="127.0.0.1",
+        port=9000,
+        timeout_sec=0.01,
+        poll_interval_sec=0.01,
+        telemetry_poll_codes=["ROLL", "PITCH", "YAW", "MODE", "ATT_REF"],
+    )
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+
+    try:
+        frames = list(client.receive_frames(max_duration_sec=0.06))
+        requests = server_sock.recv(4096).decode("utf-8").splitlines()
+
+        assert frames == []
+        assert len(requests) >= 3
+        assert all(json.loads(item)["cmd"] == "list" for item in requests)
+        assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
+
+
 def test_receive_only_peer_does_not_trigger_client_idle_disconnect():
     client = make_client()
     client_sock, server_sock = socket.socketpair()

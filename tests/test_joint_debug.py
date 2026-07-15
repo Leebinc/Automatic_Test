@@ -1,5 +1,20 @@
 from src.runner import load_yaml
-from tcp_telemetry_joint_debug import prepare_telecommand_sequence
+from tcp_telemetry_joint_debug import (
+    parse_interactive_request,
+    prepare_telecommand_sequence,
+)
+
+
+def test_interactive_telemetry_commands():
+    assert parse_interactive_request("ping") == {"cmd": "ping"}
+    assert parse_interactive_request("get ROLL") == {
+        "cmd": "get",
+        "tmCode": "ROLL",
+    }
+    assert parse_interactive_request("list ROLL,PITCH,YAW") == {
+        "cmd": "list",
+        "tmCodes": ["ROLL", "PITCH", "YAW"],
+    }
 
 
 def test_yaml_contains_eight_valid_telecommand_sources():

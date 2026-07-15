@@ -40,8 +40,8 @@
       Initial_orbit_standard: 1
       
   expected:
-    final_control_mode: "STABLE"
-    final_attitude_reference: "SUN"
+    control_mode: "3"
+    attitude_reference: "3"
     attitude_angle_converged: true
 
 - case_id: "case_002"
@@ -85,6 +85,6 @@
       Reset: [0, 1]
       Initial_orbit_standard: 1
   expected:
-    final_control_mode: "STABLE"
-    final_attitude_reference: "SUN"
+    control_mode: "3"
+    attitude_reference: "1"
     attitude_angle_converged: true
