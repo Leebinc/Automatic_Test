@@ -63,12 +63,17 @@ def test_attitude_angle_convergence_control_mode_and_reference(
             case_id=sim_case.case_id,
         )
 
-        if not converged:
-            converged = has_attitude_converged_for_hold_time(
-                frames=frames,
-                threshold_deg=threshold,
-                hold_sec=hold_sec,
+        converged = has_attitude_converged_for_hold_time(
+            frames=frames,
+            threshold_deg=threshold,
+            hold_sec=hold_sec,
+        )
+        if converged:
+            print(
+                f"{sim_case.case_id} attitude angle converged; "
+                f"stop current case at t={frame.timestamp_sec:.3f}s"
             )
+            break
 
     assert frames, f"{sim_case.case_id} did not receive any telemetry frames"
 

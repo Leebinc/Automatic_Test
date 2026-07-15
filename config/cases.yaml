@@ -2,12 +2,12 @@
   description: "第一轮半实物仿真：阳照初期"
   initial_condition:
     orbit:
-      semi_major_axis_m: 6871000
+      semi_major_axis_m: 6878137
       eccentricity: 0.001
-      inclination_deg: 97.4
+      inclination_deg: 45
       raan_deg: 0.0
-      arg_perigee_deg: 0.0
-      mean_anomaly_deg: 0.0
+      arg_perigee_deg: 30.0
+      mean_anomaly_deg: 217.907089
     year: 2026
     date_time:
       month: 6
@@ -16,9 +16,9 @@
       minute: 0
       second: 0
     attitude:
-      roll: 0.0
-      pitch: 0.0
-      yaw: 0.0
+      roll: 30.0
+      pitch: 30.0
+      yaw: 30.0
       roll_angular_velocity: 0.0
       pitch_angular_velocity: 0.0
       yaw_angular_velocity: 0.0
@@ -37,10 +37,10 @@
       Attitude_dynamics_open_closed_loop_control: 1
       Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
-      Initial_orbit_standard: 1
+      Initial_orbit_standard: 2
       
   expected:
-    control_mode: "3"
+    control_mode: "2"
     attitude_reference: "3"
     attitude_angle_converged: true
 
@@ -48,12 +48,12 @@
   description: "第二轮半实物仿真：阴影初期"
   initial_condition:
     orbit:
-      semi_major_axis_m: 6871000
+      semi_major_axis_m: 6878137
       eccentricity: 0.001
-      inclination_deg: 97.4
+      inclination_deg: 45
       raan_deg: 0.0
-      arg_perigee_deg: 0.0
-      mean_anomaly_deg: 0.0
+      arg_perigee_deg: 30.0
+      mean_anomaly_deg: 81.961326
     year: 2026
     date_time:
       month: 6
@@ -62,9 +62,9 @@
       minute: 0
       second: 0
     attitude:
-      roll: 0.0
-      pitch: 0.0
-      yaw: 0.0
+      roll: 50.0
+      pitch: 50.0
+      yaw: 50.0
       roll_angular_velocity: 0.0
       pitch_angular_velocity: 0.0
       yaw_angular_velocity: 0.0
@@ -83,8 +83,8 @@
       Attitude_dynamics_open_closed_loop_control: 1
       Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
-      Initial_orbit_standard: 1
+      Initial_orbit_standard: 2
   expected:
-    control_mode: "3"
+    control_mode: "2"
     attitude_reference: "1"
     attitude_angle_converged: true
