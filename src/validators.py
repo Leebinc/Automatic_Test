@@ -20,6 +20,9 @@ def is_attitude_angle_below_threshold(
     frame: TelemetryFrame,
     threshold_deg: float,
 ) -> bool:
+    if len(frame.attitude_angle_deg) != 3:
+        return False
+
     roll, pitch, yaw = frame.attitude_angle_deg
     return (
         abs(roll) <= threshold_deg

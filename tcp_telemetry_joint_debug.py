@@ -75,15 +75,6 @@ def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClie
     )
     if heartbeat_interval_sec is not None:
         heartbeat_interval_sec = float(heartbeat_interval_sec)
-    idle_disconnect_sec = float(
-        args.idle_timeout
-        if args.idle_timeout is not None
-        else selected_config.get(
-            "idle_disconnect_sec",
-            tcp_config.get("idle_disconnect_sec", 10.0),
-        )
-    )
-
     return TcpTelemetryClient(
         host=host,
         port=port,
@@ -95,7 +86,6 @@ def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClie
         telemetry_frame_field_codes=frame_field_codes,
         poll_interval_sec=poll_interval_sec,
         heartbeat_interval_sec=heartbeat_interval_sec,
-        idle_disconnect_sec=idle_disconnect_sec,
     )
 
 
@@ -104,20 +94,14 @@ def print_json(payload) -> None:
 
 
 def run_request_and_wait(client: TcpTelemetryClient, command: dict, print_response) -> None:
-    with client.open_connection() as sock:
-        print(f"connected to {client.host}:{client.port}")
-        client.send_command_on_connection(sock, command)
-        print(
-            f"request sent; connection remains open while waiting up to "
-            f"{client.idle_disconnect_sec:.3f}s without incoming data"
-        )
-        close_reason, response_count = client.receive_responses_until_idle(
-            sock,
-            on_response=print_response,
-        )
-
-    if response_count == 0:
-        print("no response received; this is allowed for a receive-only peer")
+    sock = client.open_connection()
+    print(f"connected to {client.host}:{client.port}")
+    client.send_command_on_connection(sock, command)
+    print("request sent; connection will remain open until Ctrl+C or server close")
+    close_reason, _ = client.receive_responses_until_closed(
+        sock,
+        on_response=print_response,
+    )
     print(close_reason)
 
 
@@ -154,7 +138,7 @@ def run_list(client: TcpTelemetryClient, tm_codes: list[str]) -> None:
     )
 
 
-def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
+def run_poll(client: TcpTelemetryClient, duration_sec: float | None) -> None:
     start_time = time.monotonic()
     for frame in client.receive_frames(max_duration_sec=duration_sec):
         print(
@@ -167,7 +151,10 @@ def run_poll(client: TcpTelemetryClient, duration_sec: float) -> None:
         )
         print_json(frame.raw)
 
-        if time.monotonic() - start_time >= duration_sec:
+        if (
+            duration_sec is not None
+            and time.monotonic() - start_time >= duration_sec
+        ):
             break
 
 
@@ -177,13 +164,24 @@ def run_send(
     expect_response: bool,
     append_newline: bool,
 ) -> None:
-    response = client.send_payload(
+    sock = client.open_connection()
+    byte_count = client.send_payload_on_connection(
+        sock=sock,
         payload=payload,
-        expect_response=expect_response,
         append_newline=append_newline,
     )
-    if response is not None:
-        print_json(response)
+    print(
+        f"sent payload bytes={byte_count}; connection will remain open "
+        f"until Ctrl+C or server close"
+    )
+    if expect_response:
+        close_reason, _ = client.receive_responses_until_closed(
+            sock,
+            on_response=print_json,
+        )
+    else:
+        close_reason = client.wait_until_closed(sock)
+    print(close_reason)
 
 
 def prepare_telecommand_sequence(telecommand_config: dict) -> list[tuple[str, bytes]]:
@@ -218,39 +216,38 @@ def run_send_sequence(
     post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
     append_newline = bool(telecommand_config.get("append_newline", False))
 
-    with client.open_connection() as sock:
-        print(f"connected to {client.host}:{client.port}")
+    sock = client.open_connection()
+    print(f"connected to {client.host}:{client.port}")
+    print(
+        f"loaded {len(prepared)} telecommands; "
+        f"interval={interval_sec:.3f}s, append_newline={append_newline}"
+    )
+
+    if initial_delay_sec > 0:
+        time.sleep(initial_delay_sec)
+
+    for index, (name, payload) in enumerate(prepared, start=1):
+        if index > 1 and interval_sec > 0:
+            time.sleep(interval_sec)
+
+        byte_count = client.send_payload_on_connection(
+            sock=sock,
+            payload=payload,
+            append_newline=append_newline,
+        )
         print(
-            f"loaded {len(prepared)} telecommands; "
-            f"interval={interval_sec:.3f}s, append_newline={append_newline}"
+            f"sent telecommand {index}/{len(prepared)}: "
+            f"name={name}, bytes={byte_count}"
         )
 
-        if initial_delay_sec > 0:
-            time.sleep(initial_delay_sec)
+    if post_delay_sec > 0:
+        time.sleep(post_delay_sec)
 
-        for index, (name, payload) in enumerate(prepared, start=1):
-            if index > 1 and interval_sec > 0:
-                time.sleep(interval_sec)
-
-            byte_count = client.send_payload_on_connection(
-                sock=sock,
-                payload=payload,
-                append_newline=append_newline,
-            )
-            print(
-                f"sent telecommand {index}/{len(prepared)}: "
-                f"name={name}, bytes={byte_count}"
-            )
-
-        if post_delay_sec > 0:
-            time.sleep(post_delay_sec)
-
-        print(
-            f"all {len(prepared)} telecommands sent; connection remains open "
-            f"until server close or {client.idle_disconnect_sec:.3f}s idle timeout"
-        )
-        close_reason = client.wait_for_idle_disconnect(sock)
-
+    print(
+        f"all {len(prepared)} telecommands sent; connection remains open "
+        f"until Ctrl+C or server close"
+    )
+    close_reason = client.wait_until_closed(sock)
     print(close_reason)
 
 
@@ -271,17 +268,12 @@ def main() -> None:
         "--tm-codes",
         help="Comma-separated telemetry codes for list/poll.",
     )
-    parser.add_argument("--duration", type=float, default=5.0)
-    parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument(
-        "--idle-timeout",
+        "--duration",
         type=float,
-        help=(
-            "Seconds to keep ping/get/list/send-sequence connections open while idle; "
-            "the timer resets whenever data is received and defaults to "
-            "tcp.idle_disconnect_sec."
-        ),
+        help="Optional poll duration; omit to run until Ctrl+C or server close.",
     )
+    parser.add_argument("--interval", type=float, default=0.5)
     parser.add_argument("--payload", help="JSON or raw text payload for send.")
     parser.add_argument(
         "--hex",
@@ -305,37 +297,46 @@ def main() -> None:
         use_telecommand_config=args.command in {"send", "send-sequence"},
     )
 
-    if args.command == "ping":
-        run_ping(client)
-    elif args.command == "get":
-        if not args.tm_code:
-            parser.error("--tm-code is required for get")
-        run_get(client, args.tm_code)
-    elif args.command == "list":
-        tm_codes = parse_tm_codes(args.tm_codes)
-        if not tm_codes:
-            parser.error("--tm-codes is required for list")
-        run_list(client, tm_codes)
-    elif args.command == "poll":
-        if not client.telemetry_poll_codes:
-            parser.error("--tm-codes or tcp.telemetry_poll_codes is required for poll")
-        run_poll(client, args.duration)
-    elif args.command == "send":
-        if args.payload is None:
-            parser.error("--payload is required for send")
-        payload = encode_hex_source(args.payload) if args.hex else parse_payload(args.payload)
-        run_send(
-            client=client,
-            payload=payload,
-            expect_response=not args.no_response,
-            append_newline=not args.no_newline,
-        )
-    elif args.command == "send-sequence":
-        env_config = load_yaml(args.env)
-        run_send_sequence(
-            client=client,
-            telecommand_config=env_config.get("telecommand", {}),
-        )
+    try:
+        if args.command == "ping":
+            run_ping(client)
+        elif args.command == "get":
+            if not args.tm_code:
+                parser.error("--tm-code is required for get")
+            run_get(client, args.tm_code)
+        elif args.command == "list":
+            tm_codes = parse_tm_codes(args.tm_codes)
+            if not tm_codes:
+                parser.error("--tm-codes is required for list")
+            run_list(client, tm_codes)
+        elif args.command == "poll":
+            if not client.telemetry_poll_codes:
+                parser.error("--tm-codes or tcp.telemetry_poll_codes is required for poll")
+            run_poll(client, args.duration)
+        elif args.command == "send":
+            if args.payload is None:
+                parser.error("--payload is required for send")
+            payload = (
+                encode_hex_source(args.payload)
+                if args.hex
+                else parse_payload(args.payload)
+            )
+            run_send(
+                client=client,
+                payload=payload,
+                expect_response=not args.no_response,
+                append_newline=not args.no_newline,
+            )
+        elif args.command == "send-sequence":
+            env_config = load_yaml(args.env)
+            run_send_sequence(
+                client=client,
+                telecommand_config=env_config.get("telecommand", {}),
+            )
+    except KeyboardInterrupt:
+        print("interrupted by user; closing persistent TCP connection")
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":

@@ -1,14 +1,15 @@
 import json
 import socket
+import threading
 
 from src.tcp_telemetry_client import TcpTelemetryClient
 
 
-def make_client(idle_disconnect_sec: float = 0.01) -> TcpTelemetryClient:
+def make_client() -> TcpTelemetryClient:
     return TcpTelemetryClient(
         host="127.0.0.1",
         port=9000,
-        idle_disconnect_sec=idle_disconnect_sec,
+        timeout_sec=0.01,
     )
 
 
@@ -46,71 +47,111 @@ def test_binary_payload_can_be_sent_on_existing_connection():
         assert client_sock.fileno() >= 0
 
 
-def test_idle_wait_reports_server_disconnect():
+def test_persistent_connection_is_reused_until_explicit_close():
     client = make_client()
     client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
 
-    with client_sock:
+    try:
+        assert client.open_connection() is client_sock
+        assert client.open_connection() is client_sock
+        assert client_sock.fileno() >= 0
+
+        client.close()
+
+        assert client_sock.fileno() == -1
+    finally:
         server_sock.close()
-        reason = client.wait_for_idle_disconnect(client_sock)
-
-    assert reason == "server closed the idle connection"
 
 
-def test_idle_wait_reports_client_timeout():
-    client = make_client(idle_disconnect_sec=0.01)
+def test_multiple_requests_share_one_persistent_connection():
+    client = make_client()
     client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
 
-    with client_sock, server_sock:
-        reason = client.wait_for_idle_disconnect(client_sock)
+    try:
+        server_sock.sendall(
+            b'{"code": 0, "msg": "pong-1"}\n'
+            b'{"code": 0, "msg": "pong-2"}\n'
+        )
 
-    assert "client idle timeout reached" in reason
+        first = client.request_once({"cmd": "ping", "index": 1})
+        second = client.request_once({"cmd": "ping", "index": 2})
+        requests = [
+            json.loads(line)
+            for line in server_sock.recv(4096).decode("utf-8").splitlines()
+        ]
+
+        assert first == {"code": 0, "msg": "pong-1"}
+        assert second == {"code": 0, "msg": "pong-2"}
+        assert requests == [
+            {"cmd": "ping", "index": 1},
+            {"cmd": "ping", "index": 2},
+        ]
+        assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
 
 
-def test_optional_response_wait_allows_receive_only_peer():
-    client = make_client(idle_disconnect_sec=0.01)
+def test_receive_only_peer_does_not_trigger_client_idle_disconnect():
+    client = make_client()
     client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
     responses = []
+    close_timer = threading.Timer(0.03, server_sock.close)
+    close_timer.start()
 
-    with client_sock, server_sock:
-        reason, response_count = client.receive_responses_until_idle(
+    try:
+        reason, response_count = client.receive_responses_until_closed(
             client_sock,
             on_response=responses.append,
         )
+    finally:
+        close_timer.join()
+        client.close()
 
     assert response_count == 0
     assert responses == []
-    assert "client idle timeout reached" in reason
+    assert reason == "server closed the connection"
 
 
-def test_optional_response_is_printed_and_resets_idle_wait():
-    client = make_client(idle_disconnect_sec=0.01)
+def test_optional_response_is_received_before_server_close():
+    client = make_client()
     client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
     responses = []
 
-    with client_sock, server_sock:
+    try:
         server_sock.sendall(b'{"code": 0, "msg": "pong"}\n')
-        reason, response_count = client.receive_responses_until_idle(
+        server_sock.close()
+        reason, response_count = client.receive_responses_until_closed(
             client_sock,
             on_response=responses.append,
         )
+    finally:
+        client.close()
 
     assert response_count == 1
     assert responses == [{"code": 0, "msg": "pong"}]
-    assert "client idle timeout reached" in reason
+    assert reason == "server closed the connection"
 
 
 def test_optional_response_accepts_json_without_newline():
-    client = make_client(idle_disconnect_sec=0.01)
+    client = make_client()
     client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
     responses = []
 
-    with client_sock, server_sock:
+    try:
         server_sock.sendall(b'{"code": 0, "msg": "pong"}')
-        _, response_count = client.receive_responses_until_idle(
+        server_sock.close()
+        _, response_count = client.receive_responses_until_closed(
             client_sock,
             on_response=responses.append,
         )
+    finally:
+        client.close()
 
     assert response_count == 1
     assert responses == [{"code": 0, "msg": "pong"}]

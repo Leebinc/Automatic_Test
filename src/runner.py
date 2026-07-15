@@ -402,6 +402,11 @@ class SimulationRunner:
             max_duration_sec=self.max_duration_sec
         )
 
+    def close(self) -> None:
+        """Close persistent TCP connections when the test session is ending."""
+        self.tcp_client.close()
+        self.telecommand_client.close()
+
 
 def _bool_config(value) -> bool:
     if isinstance(value, bool):

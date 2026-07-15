@@ -25,7 +25,6 @@ class TcpTelemetryClient:
         telemetry_frame_field_codes: dict | None = None,
         poll_interval_sec: float = 1.0,
         heartbeat_interval_sec: float | None = None,
-        idle_disconnect_sec: float = 10.0,
     ):
         self.host = host
         self.port = port
@@ -37,7 +36,8 @@ class TcpTelemetryClient:
         self.telemetry_frame_field_codes = telemetry_frame_field_codes or {}
         self.poll_interval_sec = poll_interval_sec
         self.heartbeat_interval_sec = heartbeat_interval_sec
-        self.idle_disconnect_sec = idle_disconnect_sec
+        self._socket: socket.socket | None = None
+        self._receive_buffer = b""
 
     def _connect(self) -> socket.socket:
         deadline = time.monotonic() + self.connect_retry_timeout_sec
@@ -76,13 +76,35 @@ class TcpTelemetryClient:
         return decode_telemetry_response_parameters(response)
 
     def request_once(self, command: dict) -> dict:
-        with self._connect() as sock:
-            self._send_command(sock, command)
-            return self._receive_response(sock, b"")[0]
+        sock = self.open_connection()
+        self._send_command(sock, command)
+        response, self._receive_buffer = self._receive_response(
+            sock,
+            self._receive_buffer,
+        )
+        return response
 
     def open_connection(self) -> socket.socket:
-        """Open a TCP connection whose lifetime is controlled by the caller."""
-        return self._connect()
+        """Return the process-level persistent TCP connection."""
+        if self._socket is None or self._socket.fileno() < 0:
+            self._socket = self._connect()
+            self._receive_buffer = b""
+        return self._socket
+
+    def close(self) -> None:
+        """Close the persistent connection when the client process is ending."""
+        sock = self._socket
+        self._socket = None
+        self._receive_buffer = b""
+        if sock is None:
+            return
+
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        finally:
+            sock.close()
 
     def request_on_connection(
         self,
@@ -102,129 +124,90 @@ class TcpTelemetryClient:
         """Send one JSON command without requiring a response."""
         self._send_command(sock, command)
 
-    def receive_responses_until_idle(
+    def receive_responses_until_closed(
         self,
         sock: socket.socket,
         on_response,
-        idle_timeout_sec: float | None = None,
     ) -> tuple[str, int]:
-        """Receive zero or more JSON responses until the connection is idle."""
-        idle_timeout_sec = (
-            self.idle_disconnect_sec
-            if idle_timeout_sec is None
-            else float(idle_timeout_sec)
-        )
-        if idle_timeout_sec <= 0:
-            return "client idle wait disabled; closing connection", 0
-
-        buffer = b""
+        """Receive optional JSON responses until interrupted or peer close."""
+        buffer = self._receive_buffer if sock is self._socket else b""
         response_count = 0
-        deadline = time.monotonic() + idle_timeout_sec
 
         while True:
-            remaining_sec = deadline - time.monotonic()
-            if remaining_sec <= 0:
-                return self._idle_timeout_reason(
-                    idle_timeout_sec,
-                    buffer,
-                ), response_count
-
-            sock.settimeout(remaining_sec)
+            sock.settimeout(min(max(self.timeout_sec, 0.1), 1.0))
             try:
                 data = sock.recv(self.recv_buffer_size)
             except socket.timeout:
-                return self._idle_timeout_reason(
-                    idle_timeout_sec,
-                    buffer,
-                ), response_count
+                continue
             except OSError as exc:
+                self._mark_disconnected(sock)
                 return f"server connection ended with socket error: {exc}", response_count
 
             if not data:
+                self._mark_disconnected(sock)
                 return "server closed the connection", response_count
 
             buffer += data
-            deadline = time.monotonic() + idle_timeout_sec
-
-            while b"\n" in buffer:
-                line, buffer = buffer.split(b"\n", 1)
-                line = line.strip()
-                if not line:
-                    continue
-                on_response(decode_tcp_json_response(line))
-                response_count += 1
-
-            # Also accept one complete JSON object without a newline. This is
-            # useful when the peer treats an idle TCP period as the frame end.
-            if buffer.strip():
-                try:
-                    response = decode_tcp_json_response(buffer.strip())
-                except (ValueError, UnicodeError):
-                    pass
-                else:
-                    on_response(response)
-                    response_count += 1
-                    buffer = b""
-
-    def _idle_timeout_reason(
-        self,
-        idle_timeout_sec: float,
-        buffer: bytes,
-    ) -> str:
-        if buffer:
-            preview = buffer[:64].hex(" ")
-            return (
-                f"client idle timeout reached after {idle_timeout_sec:.3f}s; "
-                f"closing connection with {len(buffer)} unparsed bytes "
-                f"(hex={preview})"
+            buffer, parsed_count = self._dispatch_json_responses(
+                buffer,
+                on_response,
             )
-        return (
-            f"client idle timeout reached after {idle_timeout_sec:.3f}s; "
-            f"closing connection"
-        )
+            response_count += parsed_count
+            if sock is self._socket:
+                self._receive_buffer = buffer
 
-    def wait_for_idle_disconnect(
-        self,
-        sock: socket.socket,
-        idle_timeout_sec: float | None = None,
-        buffered: bytes = b"",
-    ) -> str:
-        """Wait until the server closes or the local idle timeout is reached."""
-        idle_timeout_sec = (
-            self.idle_disconnect_sec
-            if idle_timeout_sec is None
-            else float(idle_timeout_sec)
-        )
-        if idle_timeout_sec <= 0:
-            return "client idle wait disabled; closing connection"
-
-        extra_bytes = len(buffered)
-        deadline = time.monotonic() + idle_timeout_sec
+    def wait_until_closed(self, sock: socket.socket) -> str:
+        """Keep a connection open until interrupted or the peer closes it."""
+        received_bytes = 0
 
         while True:
-            remaining_sec = deadline - time.monotonic()
-            if remaining_sec <= 0:
-                return (
-                    f"client idle timeout reached after {idle_timeout_sec:.3f}s; "
-                    f"closing connection (extra_bytes={extra_bytes})"
-                )
-
-            sock.settimeout(remaining_sec)
+            sock.settimeout(min(max(self.timeout_sec, 0.1), 1.0))
             try:
                 data = sock.recv(self.recv_buffer_size)
             except socket.timeout:
-                return (
-                    f"client idle timeout reached after {idle_timeout_sec:.3f}s; "
-                    f"closing connection (extra_bytes={extra_bytes})"
-                )
+                continue
             except OSError as exc:
+                self._mark_disconnected(sock)
                 return f"server connection ended with socket error: {exc}"
 
             if not data:
-                return "server closed the idle connection"
+                self._mark_disconnected(sock)
+                return "server closed the connection"
 
-            extra_bytes += len(data)
-            deadline = time.monotonic() + idle_timeout_sec
+            received_bytes += len(data)
+            print(f"received {len(data)} unexpected bytes (total={received_bytes})")
+
+    def _dispatch_json_responses(self, buffer: bytes, on_response) -> tuple[bytes, int]:
+        response_count = 0
+
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            line = line.strip()
+            if not line:
+                continue
+            on_response(decode_tcp_json_response(line))
+            response_count += 1
+
+        if buffer.strip():
+            try:
+                response = decode_tcp_json_response(buffer.strip())
+            except (ValueError, UnicodeError):
+                pass
+            else:
+                on_response(response)
+                response_count += 1
+                buffer = b""
+
+        return buffer, response_count
+
+    def _mark_disconnected(self, sock: socket.socket) -> None:
+        if sock is not self._socket:
+            return
+        try:
+            sock.close()
+        finally:
+            self._socket = None
+            self._receive_buffer = b""
 
     def send_payload(
         self,
@@ -232,11 +215,19 @@ class TcpTelemetryClient:
         expect_response: bool = True,
         append_newline: bool = True,
     ) -> dict | None:
-        with self._connect() as sock:
-            sock.sendall(encode_tcp_payload(payload, append_newline=append_newline))
-            if not expect_response:
-                return None
-            return self._receive_response(sock, b"")[0]
+        sock = self.open_connection()
+        self.send_payload_on_connection(
+            sock,
+            payload,
+            append_newline=append_newline,
+        )
+        if not expect_response:
+            return None
+        response, self._receive_buffer = self._receive_response(
+            sock,
+            self._receive_buffer,
+        )
+        return response
 
     def send_payload_on_connection(
         self,
@@ -246,7 +237,11 @@ class TcpTelemetryClient:
     ) -> int:
         """Send one payload on an existing connection and return its byte count."""
         data = encode_tcp_payload(payload, append_newline=append_newline)
-        sock.sendall(data)
+        try:
+            sock.sendall(data)
+        except OSError:
+            self._mark_disconnected(sock)
+            raise
         return len(data)
 
     def receive_frames(
@@ -265,39 +260,51 @@ class TcpTelemetryClient:
         self,
         max_duration_sec: float | None = None,
     ) -> Iterator[TelemetryFrame]:
-        buffer = b""
         command = {"cmd": "list", "tmCodes": self.telemetry_poll_codes}
+        sock = self.open_connection()
+        start_time = time.monotonic()
+        operation_deadline = (
+            start_time + max_duration_sec
+            if max_duration_sec is not None
+            else None
+        )
+        last_heartbeat_time = start_time
 
-        with self._connect() as sock:
-            start_time = time.monotonic()
-            last_heartbeat_time = start_time
+        while True:
+            now = time.monotonic()
+            if operation_deadline is not None and now >= operation_deadline:
+                return
 
-            while True:
-                now = time.monotonic()
-                if (
-                    max_duration_sec is not None
-                    and now - start_time >= max_duration_sec
-                ):
-                    return
-
+            try:
                 if self._heartbeat_due(now, last_heartbeat_time):
                     self._send_command(sock, {"cmd": "ping"})
-                    response, buffer = self._receive_response(sock, buffer)
+                    response, self._receive_buffer = self._receive_response(
+                        sock,
+                        self._receive_buffer,
+                        deadline=operation_deadline,
+                    )
                     self._validate_heartbeat_response(response)
                     last_heartbeat_time = now
 
                 self._send_command(sock, command)
-                response, buffer = self._receive_response(sock, buffer)
-                frame = decode_telemetry_response_frame(
-                    response=response,
-                    field_codes=self.telemetry_frame_field_codes,
+                response, self._receive_buffer = self._receive_response(
+                    sock,
+                    self._receive_buffer,
+                    deadline=operation_deadline,
                 )
-                # Convergence duration uses local monotonic elapsed time, not
-                # spacecraft/system telemetry time.
-                frame.timestamp_sec = time.monotonic() - start_time
-                yield frame
+            except TimeoutError:
+                return
 
-                time.sleep(self.poll_interval_sec)
+            frame = decode_telemetry_response_frame(
+                response=response,
+                field_codes=self.telemetry_frame_field_codes,
+            )
+            # Convergence duration uses local monotonic elapsed time, not
+            # spacecraft/system telemetry time.
+            frame.timestamp_sec = time.monotonic() - start_time
+            yield frame
+
+            time.sleep(self.poll_interval_sec)
 
     def _heartbeat_due(self, now: float, last_heartbeat_time: float) -> bool:
         return (
@@ -315,22 +322,44 @@ class TcpTelemetryClient:
             )
 
     def _send_command(self, sock: socket.socket, command: dict) -> None:
-        sock.sendall(encode_tcp_json_command(command))
+        try:
+            sock.sendall(encode_tcp_json_command(command))
+        except OSError:
+            self._mark_disconnected(sock)
+            raise
 
     def _receive_response(
         self,
         sock: socket.socket,
         buffer: bytes,
+        deadline: float | None = None,
     ) -> tuple[dict, bytes]:
         while b"\n" not in buffer:
-            data = sock.recv(self.recv_buffer_size)
+            if deadline is not None:
+                remaining_sec = deadline - time.monotonic()
+                if remaining_sec <= 0:
+                    raise TimeoutError("telemetry response operation deadline reached")
+                sock.settimeout(min(self.timeout_sec, remaining_sec))
+            else:
+                sock.settimeout(self.timeout_sec)
+
+            try:
+                data = sock.recv(self.recv_buffer_size)
+            except socket.timeout:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise TimeoutError("telemetry response operation deadline reached")
+                continue
+            except OSError:
+                self._mark_disconnected(sock)
+                raise
             if not data:
+                self._mark_disconnected(sock)
                 raise ConnectionError("TCP telemetry server closed the connection")
             buffer += data
 
         line, buffer = buffer.split(b"\n", 1)
         line = line.strip()
         if not line:
-            return self._receive_response(sock, buffer)
+            return self._receive_response(sock, buffer, deadline=deadline)
 
         return decode_tcp_json_response(line), buffer

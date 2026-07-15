@@ -46,8 +46,8 @@ SPARE1_FIELD_ORDER = (
 
 SPARE2_FIELD_ORDER = (
     "spare7",
-    "spare",
     "spare8",
+    "spare9",
 )
 
 CONFIG_FIELD_ORDER = (

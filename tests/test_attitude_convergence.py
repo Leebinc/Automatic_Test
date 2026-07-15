@@ -19,7 +19,9 @@ def env_config():
 
 @pytest.fixture(scope="session")
 def runner(env_config):
-    return SimulationRunner(env_config)
+    simulation_runner = SimulationRunner(env_config)
+    yield simulation_runner
+    simulation_runner.close()
 
 
 @pytest.fixture(scope="session")
