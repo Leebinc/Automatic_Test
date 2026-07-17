@@ -8,6 +8,9 @@ from tests.validators import (
     has_converged_for_hold_time,
     is_angular_rate_below_threshold,
     is_attitude_angle_below_threshold,
+    is_roll_and_pitch_below_threshold,
+    should_check_attitude_reference,
+    should_check_control_mode,
 )
 
 
@@ -91,6 +94,50 @@ def test_missing_optional_angular_rate_does_not_converge():
     frame = make_frame(0.0, [0.0, 0.0, 0.0], angular_rate_deg_s=None)
 
     assert not is_angular_rate_below_threshold(frame, threshold_deg_s=0.05)
+
+
+def test_control_mode_check_trigger_uses_roll_and_pitch_strictly_below_limit():
+    assert is_roll_and_pitch_below_threshold(
+        make_frame(0.0, [5.999, -5.999, 100.0]),
+        threshold_deg=6.0,
+    )
+    assert not is_roll_and_pitch_below_threshold(
+        make_frame(0.0, [6.0, 0.0, 0.0]),
+        threshold_deg=6.0,
+    )
+    assert not is_roll_and_pitch_below_threshold(
+        make_frame(0.0, [0.0, -6.0, 0.0]),
+        threshold_deg=6.0,
+    )
+
+
+def test_control_mode_check_remains_started_after_angle_leaves_range():
+    check_started = False
+    states = []
+    for frame in (
+        make_frame(0.0, [7.0, 0.0, 0.0]),
+        make_frame(2.0, [5.0, -5.0, 90.0]),
+        make_frame(4.0, [8.0, 8.0, 0.0]),
+    ):
+        check_started = should_check_control_mode(
+            frame=frame,
+            threshold_deg=6.0,
+            check_started=check_started,
+        )
+        states.append(check_started)
+
+    assert states == [False, True, True]
+
+
+def test_attitude_reference_check_starts_after_configured_delay():
+    assert not should_check_attitude_reference(
+        make_frame(9.999, [0.0, 0.0, 0.0]),
+        10.0,
+    )
+    assert should_check_attitude_reference(
+        make_frame(10.0, [0.0, 0.0, 0.0]),
+        10.0,
+    )
 
 
 def test_control_mode_mismatch_at_any_frame_raises_immediately():

@@ -31,6 +31,30 @@ def is_attitude_angle_below_threshold(
     )
 
 
+def is_roll_and_pitch_below_threshold(
+    frame: TelemetryFrame,
+    threshold_deg: float,
+) -> bool:
+    """Return whether roll and pitch are both strictly inside the threshold."""
+    if len(frame.attitude_angle_deg) != 3:
+        return False
+
+    roll, pitch, _ = frame.attitude_angle_deg
+    return abs(roll) < threshold_deg and abs(pitch) < threshold_deg
+
+
+def should_check_control_mode(
+    frame: TelemetryFrame,
+    threshold_deg: float,
+    check_started: bool,
+) -> bool:
+    """Latch control-mode judgment after roll and pitch first enter range."""
+    return check_started or is_roll_and_pitch_below_threshold(
+        frame=frame,
+        threshold_deg=threshold_deg,
+    )
+
+
 def has_angular_rate_converged_for_hold_time(
     frames: list[TelemetryFrame],
     threshold_deg_s: float,
@@ -84,6 +108,14 @@ def has_attitude_converged_for_hold_time(
             valid_start_time = None
 
     return False
+
+
+def should_check_attitude_reference(
+    frame: TelemetryFrame,
+    delay_sec: float,
+) -> bool:
+    """Return whether attitude-reference judgment should start."""
+    return frame.timestamp_sec >= max(float(delay_sec), 0.0)
 
 
 def assert_control_mode_matches(

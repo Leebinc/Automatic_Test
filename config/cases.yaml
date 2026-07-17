@@ -16,9 +16,9 @@
       minute: 0
       second: 0
     attitude:
-      roll: 30.0
-      pitch: 30.0
-      yaw: 30.0
+      roll: 15.0
+      pitch: 15.0
+      yaw: 15.0
       roll_angular_velocity: 0.0
       pitch_angular_velocity: 0.0
       yaw_angular_velocity: 0.0
@@ -40,7 +40,7 @@
       Initial_orbit_standard: 2
       
   expected:
-    control_mode: "2"
+    control_mode: "3"
     attitude_reference: "3"
     attitude_angle_converged: true
 
@@ -62,9 +62,9 @@
       minute: 0
       second: 0
     attitude:
-      roll: 50.0
-      pitch: 50.0
-      yaw: 50.0
+      roll: 15.0
+      pitch: 15.0
+      yaw: 15.0
       roll_angular_velocity: 0.0
       pitch_angular_velocity: 0.0
       yaw_angular_velocity: 0.0
@@ -85,6 +85,6 @@
       Reset: [0, 1]
       Initial_orbit_standard: 2
   expected:
-    control_mode: "2"
+    control_mode: "3"
     attitude_reference: "1"
     attitude_angle_converged: true

@@ -20,7 +20,7 @@ class TcpTelemetryClient:
         timeout_sec: float = 2.0,
         recv_buffer_size: int = 4096,
         connect_retry_timeout_sec: float = 20.0,
-        connect_retry_interval_sec: float = 0.5,
+        connect_retry_interval_sec: float = 5,
         telemetry_poll_codes: list[str] | None = None,
         telemetry_frame_field_codes: dict | None = None,
         poll_interval_sec: float = 1.0,

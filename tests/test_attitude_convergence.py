@@ -5,6 +5,8 @@ from tests.validators import (
     assert_attitude_reference_matches,
     assert_control_mode_matches,
     has_attitude_converged_for_hold_time,
+    should_check_attitude_reference,
+    should_check_control_mode,
 )
 
 
@@ -46,34 +48,65 @@ def test_attitude_angle_convergence_control_mode_and_reference(
 ):
     threshold = float(validation_config["attitude_angle_threshold_deg"])
     hold_sec = float(validation_config["convergence_hold_sec"])
+    control_mode_angle_threshold_deg = float(
+        validation_config["control_mode_check_angle_threshold_deg"]
+    )
+    attitude_reference_check_delay_sec = float(
+        validation_config.get("attitude_reference_check_delay_sec", 0.0)
+    )
     frames = []
     converged = False
+    control_mode_check_started = False
+    frame_source = runner.iter_frames(sim_case)
 
-    for frame in runner.iter_frames(sim_case):
-        frames.append(frame)
+    try:
+        for frame in frame_source:
+            frames.append(frame)
 
-        assert_control_mode_matches(
-            frame=frame,
-            expected_mode=sim_case.expected.control_mode,
-            case_id=sim_case.case_id,
-        )
-        assert_attitude_reference_matches(
-            frame=frame,
-            expected_reference=sim_case.expected.attitude_reference,
-            case_id=sim_case.case_id,
-        )
-
-        converged = has_attitude_converged_for_hold_time(
-            frames=frames,
-            threshold_deg=threshold,
-            hold_sec=hold_sec,
-        )
-        if converged:
-            print(
-                f"{sim_case.case_id} attitude angle converged; "
-                f"stop current case at t={frame.timestamp_sec:.3f}s"
+            check_was_started = control_mode_check_started
+            control_mode_check_started = should_check_control_mode(
+                frame=frame,
+                threshold_deg=control_mode_angle_threshold_deg,
+                check_started=control_mode_check_started,
             )
-            break
+            if control_mode_check_started and not check_was_started:
+                print(
+                    f"{sim_case.case_id} control-mode check started; "
+                    f"roll={frame.attitude_angle_deg[0]}, "
+                    f"pitch={frame.attitude_angle_deg[1]}"
+                )
+
+            if control_mode_check_started:
+                assert_control_mode_matches(
+                    frame=frame,
+                    expected_mode=sim_case.expected.control_mode,
+                    case_id=sim_case.case_id,
+                )
+
+            if should_check_attitude_reference(
+                frame,
+                attitude_reference_check_delay_sec,
+            ):
+                assert_attitude_reference_matches(
+                    frame=frame,
+                    expected_reference=sim_case.expected.attitude_reference,
+                    case_id=sim_case.case_id,
+                )
+
+            converged = has_attitude_converged_for_hold_time(
+                frames=frames,
+                threshold_deg=threshold,
+                hold_sec=hold_sec,
+            )
+            if converged:
+                print(
+                    f"{sim_case.case_id} attitude angle converged; "
+                    f"stop current case at t={frame.timestamp_sec:.3f}s"
+                )
+                break
+    finally:
+        # Closing the generator records the case end even when validation raises.
+        frame_source.close()
 
     assert frames, f"{sim_case.case_id} did not receive any telemetry frames"
 

@@ -109,38 +109,58 @@ class SimulationRunner:
         self.reset_sequence_delay_sec = float(
             simulation_config.get("reset_sequence_delay_sec", 3.0)
         )
+        self.case_interval_sec = float(
+            simulation_config.get("case_interval_sec", 0.0)
+        )
+        self._last_case_end_time = None
 
     def iter_frames(self, sim_case: SimulationCase):
         """Prepare one case and yield telemetry frames without judging them."""
-        reset_clear_payload = self.udp_client.send_initial_condition(
-            sim_case.initial_condition,
-            reset=False,
-        )
-        print(
-            f"sent initial condition by UDP: "
-            f"case_id={sim_case.case_id}, reset=0, "
-            f"bytes={len(reset_clear_payload)}"
-        )
-
-        reset_start_sent = self._send_telecommand_if_configured(sim_case)
-        if not reset_start_sent:
-            if self.reset_sequence_delay_sec > 0:
-                time.sleep(self.reset_sequence_delay_sec)
-
-            reset_start_payload = self.udp_client.send_initial_condition(
+        self._wait_for_case_interval()
+        try:
+            reset_clear_payload = self.udp_client.send_initial_condition(
                 sim_case.initial_condition,
-                reset=True,
+                reset=False,
             )
             print(
                 f"sent initial condition by UDP: "
-                f"case_id={sim_case.case_id}, reset=1, "
-                f"bytes={len(reset_start_payload)}"
+                f"case_id={sim_case.case_id}, reset=0, "
+                f"bytes={len(reset_clear_payload)}"
             )
 
-        if self.post_udp_delay_sec > 0:
-            time.sleep(self.post_udp_delay_sec)
+            reset_start_sent = self._send_telecommand_if_configured(sim_case)
+            if not reset_start_sent:
+                if self.reset_sequence_delay_sec > 0:
+                    time.sleep(self.reset_sequence_delay_sec)
 
-        yield from self._receive_frames()
+                reset_start_payload = self.udp_client.send_initial_condition(
+                    sim_case.initial_condition,
+                    reset=True,
+                )
+                print(
+                    f"sent initial condition by UDP: "
+                    f"case_id={sim_case.case_id}, reset=1, "
+                    f"bytes={len(reset_start_payload)}"
+                )
+
+            if self.post_udp_delay_sec > 0:
+                time.sleep(self.post_udp_delay_sec)
+
+            yield from self._receive_frames()
+        finally:
+            self._last_case_end_time = time.monotonic()
+
+    def _wait_for_case_interval(self) -> None:
+        if self._last_case_end_time is None or self.case_interval_sec <= 0:
+            return
+
+        elapsed_sec = time.monotonic() - self._last_case_end_time
+        remaining_sec = self.case_interval_sec - elapsed_sec
+        if remaining_sec <= 0:
+            return
+
+        print(f"waiting {remaining_sec:.3f}s before the next test case")
+        time.sleep(remaining_sec)
 
     def run_once(self, sim_case: SimulationCase):
         """Compatibility helper that collects frames without judging them."""
