@@ -99,7 +99,7 @@ def test_attitude_angle_convergence_control_mode_and_reference(
     validation_config,
     sim_case,
 ):
-    allure.dynamic.title(f"{sim_case.case_id}：{sim_case.description}")
+    allure.dynamic.title(f"{sim_case.case_id}: {sim_case.description}")
     allure.dynamic.id(sim_case.case_id)
     allure.dynamic.tag("hardware-in-the-loop", "attitude-control")
     allure.dynamic.description(
