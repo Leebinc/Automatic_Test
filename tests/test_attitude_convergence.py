@@ -7,6 +7,7 @@ import allure
 import pytest
 
 from src.runner import SimulationRunner, load_cases, load_yaml
+from src.tcp_telemetry_client import AsyncTelecommandError
 from tests.validators import (
     assert_attitude_reference_matches,
     assert_control_mode_matches,
@@ -189,6 +190,11 @@ def test_attitude_angle_convergence_control_mode_and_reference(
                         f"stop current case at t={frame.timestamp_sec:.3f}s"
                     )
                     break
+    except AsyncTelecommandError as exc:
+        pytest.fail(
+            f"{sim_case.case_id} asynchronous telecommand failed: {exc}",
+            pytrace=False,
+        )
     finally:
         # Closing the generator records the case end even when validation raises.
         frame_source.close()

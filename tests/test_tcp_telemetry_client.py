@@ -2,7 +2,9 @@ import json
 import socket
 import threading
 
-from src.tcp_telemetry_client import TcpTelemetryClient
+import pytest
+
+from src.tcp_telemetry_client import AsyncTelecommandError, TcpTelemetryClient
 
 
 def make_client() -> TcpTelemetryClient:
@@ -28,22 +30,6 @@ def test_request_on_connection_keeps_socket_open():
         assert request == {"cmd": "ping"}
         assert response == {"code": 0, "msg": "pong"}
         assert buffer == b""
-        assert client_sock.fileno() >= 0
-
-
-def test_binary_payload_can_be_sent_on_existing_connection():
-    client = make_client()
-    client_sock, server_sock = socket.socketpair()
-
-    with client_sock, server_sock:
-        byte_count = client.send_payload_on_connection(
-            client_sock,
-            b"\x20\x00\x18\x14",
-            append_newline=False,
-        )
-
-        assert byte_count == 4
-        assert server_sock.recv(4096) == b"\x20\x00\x18\x14"
         assert client_sock.fileno() >= 0
 
 
@@ -89,6 +75,125 @@ def test_multiple_requests_share_one_persistent_connection():
             {"cmd": "ping", "index": 2},
         ]
         assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
+
+
+def test_async_notify_and_execute_use_command_code_and_matching_request_ids():
+    client = make_client()
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+
+    try:
+        server_sock.sendall(
+            b'{"requestId":"notify-1","code":0,"msg":"Channel notified"}\n'
+        )
+        notification = client.send_async_telecommand_request(
+            operation="notify",
+            command_code="K3036",
+            satellite="SAT-1",
+            channel="CH1",
+            response_timeout_sec=1.0,
+            request_id="notify-1",
+        )
+        notify_request = json.loads(server_sock.recv(4096).decode("utf-8"))
+
+        server_sock.sendall(
+            b'{"requestId":"execute-1","code":0,'
+            b'"msg":"Command executed successfully"}\n'
+        )
+        execution = client.send_async_telecommand_request(
+            operation="execute",
+            command_code="K3036",
+            satellite="SAT-1",
+            channel="CH1",
+            response_timeout_sec=1.0,
+            request_id="execute-1",
+        )
+        execute_request = json.loads(server_sock.recv(4096).decode("utf-8"))
+
+        assert notify_request == {
+            "cmd": "notify",
+            "commandCode": "K3036",
+            "requestId": "notify-1",
+            "satellite": "SAT-1",
+            "channel": "CH1",
+        }
+        assert execute_request == {
+            "cmd": "execute",
+            "commandCode": "K3036",
+            "requestId": "execute-1",
+            "satellite": "SAT-1",
+            "channel": "CH1",
+        }
+        assert notification["code"] == 0
+        assert execution["code"] == 0
+        assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
+
+
+def test_async_nonzero_result_raises_and_keeps_connection_open():
+    client = make_client()
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+
+    try:
+        server_sock.sendall(
+            b'{"requestId":"execute-failed","code":-1,'
+            b'"msg":"execution failed"}\n'
+        )
+
+        with pytest.raises(AsyncTelecommandError, match="execute failed"):
+            client.send_async_telecommand_request(
+                operation="execute",
+                command_code="K3036",
+                response_timeout_sec=1.0,
+                request_id="execute-failed",
+            )
+
+        assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
+
+
+def test_async_out_of_order_response_is_saved_for_matching_request():
+    client = make_client()
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+
+    try:
+        server_sock.sendall(
+            b'{"requestId":"execute-later","code":0,'
+            b'"msg":"Command executed successfully"}\n'
+            b'{"requestId":"notify-now","code":0,"msg":"Channel notified"}\n'
+        )
+        notification = client.send_async_telecommand_request(
+            operation="notify",
+            command_code="K3036",
+            response_timeout_sec=1.0,
+            request_id="notify-now",
+        )
+        execute_response = client.send_async_telecommand_request(
+            operation="execute",
+            command_code="K3036",
+            response_timeout_sec=1.0,
+            request_id="execute-later",
+        )
+        sent_requests = [
+            json.loads(line)
+            for line in server_sock.recv(4096).decode("utf-8").splitlines()
+        ]
+
+        assert notification["requestId"] == "notify-now"
+        assert execute_response["requestId"] == "execute-later"
+        assert [request["cmd"] for request in sent_requests] == [
+            "notify",
+            "execute",
+        ]
     finally:
         client.close()
         server_sock.close()

@@ -38,6 +38,17 @@
       Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
       Initial_orbit_standard: 2
+  telecommand:
+    command_codes:
+      - "K3072"
+      - "TEMP031"
+      - "K3006"
+      - command_code: "ZS300"
+        sync_reset_start: true
+      - "K3139"
+      - "K3117"
+      - "TEMP041"
+      - "K3036"
   expected:
     control_mode: "3"
     attitude_reference: "3"
@@ -83,6 +94,17 @@
       Orbit_open_closed_loop_control: 1
       Reset: [0, 1]
       Initial_orbit_standard: 2
+  telecommand:
+    command_codes:
+      - "K3072"
+      - "TEMP031"
+      - "K3006"
+      - command_code: "ZS300"
+        sync_reset_start: true
+      - "K3139"
+      - "K3117"
+      - "TEMP041"
+      - "K3036"
   expected:
     control_mode: "3"
     attitude_reference: "1"

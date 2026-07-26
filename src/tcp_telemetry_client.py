@@ -1,5 +1,6 @@
 import socket
 import time
+import uuid
 from collections.abc import Iterator
 
 from src.models import TelemetryFrame
@@ -8,8 +9,11 @@ from src.protocols import (
     decode_telemetry_response_frame,
     decode_telemetry_response_parameters,
     encode_tcp_json_command,
-    encode_tcp_payload,
 )
+
+
+class AsyncTelecommandError(RuntimeError):
+    """Raised when an asynchronous notify/execute request does not succeed."""
 
 
 class TcpTelemetryClient:
@@ -38,6 +42,7 @@ class TcpTelemetryClient:
         self.heartbeat_interval_sec = heartbeat_interval_sec
         self._socket: socket.socket | None = None
         self._receive_buffer = b""
+        self._pending_async_responses: dict[str, dict] = {}
 
     # 底层连接方法
     def _connect(self) -> socket.socket:
@@ -80,6 +85,106 @@ class TcpTelemetryClient:
         response = self.request_once({"cmd": "list", "tmCodes": tm_codes})
         return decode_telemetry_response_parameters(response)
 
+    def send_async_telecommand_request(
+        self,
+        operation: str,
+        command_code: str,
+        response_timeout_sec: float,
+        satellite: str | None = None,
+        channel: str | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        """Send notify/execute and wait for its matching asynchronous result."""
+        operation = str(operation).strip().lower()
+        if operation not in {"notify", "execute"}:
+            raise ValueError(
+                f"asynchronous telecommand operation must be notify or execute: "
+                f"{operation!r}"
+            )
+
+        command_code = str(command_code).strip()
+        if not command_code:
+            raise ValueError("telecommand command_code must not be empty")
+
+        response_timeout_sec = float(response_timeout_sec)
+        if response_timeout_sec <= 0:
+            raise ValueError("asynchronous response timeout must be greater than zero")
+
+        request_id = str(request_id or uuid.uuid4())
+        command = {
+            "cmd": operation,
+            "commandCode": command_code,
+            "requestId": request_id,
+        }
+        if satellite:
+            command["satellite"] = str(satellite)
+        if channel:
+            command["channel"] = str(channel)
+
+        try:
+            sock = self.open_connection()
+            self._send_command(sock, command)
+            deadline = time.monotonic() + response_timeout_sec
+            response = self._wait_for_async_response(
+                sock=sock,
+                request_id=request_id,
+                deadline=deadline,
+            )
+        except AsyncTelecommandError:
+            raise
+        except (ConnectionError, OSError, TimeoutError, ValueError) as exc:
+            raise AsyncTelecommandError(
+                f"asynchronous telecommand {operation} did not complete; "
+                f"command_code={command_code}, request_id={request_id}, "
+                f"reason={exc}"
+            ) from exc
+
+        try:
+            response_code = int(response.get("code", -1))
+        except (TypeError, ValueError) as exc:
+            raise AsyncTelecommandError(
+                f"asynchronous telecommand {operation} returned an invalid code; "
+                f"command_code={command_code}, request_id={request_id}, "
+                f"response={response}"
+            ) from exc
+
+        if response_code != 0:
+            raise AsyncTelecommandError(
+                f"asynchronous telecommand {operation} failed; "
+                f"command_code={command_code}, request_id={request_id}, "
+                f"code={response_code}, msg={response.get('msg', '')}"
+            )
+
+        return response
+
+    def _wait_for_async_response(
+        self,
+        sock: socket.socket,
+        request_id: str,
+        deadline: float,
+    ) -> dict:
+        pending = self._pending_async_responses.pop(request_id, None)
+        if pending is not None:
+            return pending
+
+        while True:
+            response, self._receive_buffer = self._receive_response(
+                sock,
+                self._receive_buffer,
+                deadline=deadline,
+            )
+            response_request_id = response.get("requestId")
+            if response_request_id is None:
+                raise AsyncTelecommandError(
+                    f"asynchronous response is missing requestId: {response}"
+                )
+
+            response_request_id = str(response_request_id)
+            if response_request_id == request_id:
+                return response
+
+            self._pending_async_responses[response_request_id] = response
+
     # 发送一次请求，读取一次响应
     def request_once(self, command: dict) -> dict:
         sock = self.open_connection()
@@ -104,6 +209,7 @@ class TcpTelemetryClient:
         sock = self._socket
         self._socket = None
         self._receive_buffer = b""
+        self._pending_async_responses.clear()
         if sock is None:
             return
 
@@ -226,43 +332,14 @@ class TcpTelemetryClient:
         finally:
             self._socket = None
             self._receive_buffer = b""
+            self._pending_async_responses.clear()
 
     # 发送任意负载
-    def send_payload(
-        self,
-        payload,
-        expect_response: bool = True,
-        append_newline: bool = True,
-    ) -> dict | None:
-        sock = self.open_connection()
-        self.send_payload_on_connection(
-            sock,
-            payload,
-            append_newline=append_newline,
-        )
-        if not expect_response:
-            return None
-        response, self._receive_buffer = self._receive_response(
-            sock,
-            self._receive_buffer,
-        )
-        return response
+    # Legacy raw-payload telecommand sending was removed. Telecommands must use
+    # send_async_telecommand_request() with a configured commandCode.
 
     # 调用编码函数得到字节流，完整发送后返回字节长度
-    def send_payload_on_connection(
-        self,
-        sock: socket.socket,
-        payload,
-        append_newline: bool = False,
-    ) -> int:
-        """Send one payload on an existing connection and return its byte count."""
-        data = encode_tcp_payload(payload, append_newline=append_newline)
-        try:
-            sock.sendall(data)
-        except OSError:
-            self._mark_disconnected(sock)
-            raise
-        return len(data)
+    # JSON protocol commands are encoded and newline-terminated by _send_command.
 
     # 遥测帧轮询
     def receive_frames(
@@ -376,7 +453,7 @@ class TcpTelemetryClient:
             if deadline is not None:
                 remaining_sec = deadline - time.monotonic()
                 if remaining_sec <= 0:
-                    raise TimeoutError("telemetry response operation deadline reached")
+                    raise TimeoutError("TCP response operation deadline reached")
                 sock.settimeout(min(self.timeout_sec, remaining_sec))
             else:
                 sock.settimeout(self.timeout_sec)
@@ -385,7 +462,7 @@ class TcpTelemetryClient:
                 data = sock.recv(self.recv_buffer_size)
             except socket.timeout:
                 if deadline is not None and time.monotonic() >= deadline:
-                    raise TimeoutError("telemetry response operation deadline reached")
+                    raise TimeoutError("TCP response operation deadline reached")
                 continue
             except OSError:
                 self._mark_disconnected(sock)

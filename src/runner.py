@@ -3,7 +3,6 @@ import time
 import yaml
 
 from src.models import ExpectedResult, InitialCondition, SimulationCase
-from src.protocols import encode_hex_source, encode_time_sync_hex_source
 from src.tcp_telemetry_client import TcpTelemetryClient
 from src.udp_client import UdpInitialConditionClient
 
@@ -170,82 +169,74 @@ class SimulationRunner:
 
     def _send_telecommand_if_configured(self, sim_case: SimulationCase) -> bool:
         telecommand_config = self._resolve_telecommand_config(sim_case)
-        payload = telecommand_config.get("payload")
-        sequence = telecommand_config.get("sequence")
+        command_codes = telecommand_config.get("command_codes")
+        if command_codes is None:
+            command_code = telecommand_config.get("command_code")
+            command_codes = [command_code] if command_code else []
+
         enabled = _bool_config(
             telecommand_config.get(
                 "enabled",
-                payload is not None or sequence is not None,
+                bool(command_codes),
             )
         )
 
         if not enabled:
             return False
 
-        if sequence:
-            return self._send_telecommand_sequence(sim_case, telecommand_config)
+        if not isinstance(command_codes, list) or not command_codes:
+            raise ValueError(
+                f"{sim_case.case_id} telecommand.command_codes must be a "
+                f"non-empty list"
+            )
 
-        if payload is None:
-            return False
-
-        expect_response = _bool_config(
-            telecommand_config.get("expect_response", True)
+        return self._send_async_telecommands(
+            sim_case=sim_case,
+            telecommand_config=telecommand_config,
+            command_codes=command_codes,
         )
-        append_newline = _bool_config(
-            telecommand_config.get("append_newline", True)
-        )
-        response = self.telecommand_client.send_payload(
-            payload=payload,
-            expect_response=expect_response,
-            append_newline=append_newline,
-        )
-        print(
-            f"sent telecommand by TCP: "
-            f"case_id={sim_case.case_id}, expect_response={expect_response}"
-        )
-        if response is not None:
-            print(f"telecommand response: {response}")
 
-        post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
-        if post_delay_sec > 0:
-            time.sleep(post_delay_sec)
-
-        return False
-
-    def _send_telecommand_sequence(
+    def _send_async_telecommands(
         self,
         sim_case: SimulationCase,
         telecommand_config: dict,
+        command_codes: list,
     ) -> bool:
-        sequence = telecommand_config.get("sequence", [])
-        if not isinstance(sequence, list) or not sequence:
-            return False
-
         interval_sec = float(telecommand_config.get("interval_sec", 0.1))
-        expect_response = _bool_config(
-            telecommand_config.get("expect_response", False)
+        notification_timeout_sec = float(
+            telecommand_config.get("notification_timeout_sec", 30.0)
         )
-        append_newline = _bool_config(
-            telecommand_config.get("append_newline", False)
+        execution_timeout_sec = float(
+            telecommand_config.get("execution_timeout_sec", 60.0)
         )
-        epoch_year = int(telecommand_config.get("time_epoch_year", 2006))
         reset_start_sent = False
 
         initial_delay_sec = float(telecommand_config.get("initial_delay_sec", 0.0))
         if initial_delay_sec > 0:
             time.sleep(initial_delay_sec)
 
-        for index, item in enumerate(sequence):
+        for index, raw_item in enumerate(command_codes):
             if index > 0 and interval_sec > 0:
                 time.sleep(interval_sec)
 
-            if not isinstance(item, dict):
-                raise ValueError(f"telecommand sequence item must be a dict: {item!r}")
+            item = self._normalize_telecommand_item(raw_item, index=index)
+            command_code = item["command_code"]
+            satellite = item.get("satellite", telecommand_config.get("satellite"))
+            channel = item.get("channel", telecommand_config.get("channel"))
 
-            name = str(item.get("name", f"command_{index + 1}"))
-            hex_source = item.get("hex")
-            if not hex_source:
-                raise ValueError(f"telecommand {name} is missing hex source")
+            notification = self.telecommand_client.send_async_telecommand_request(
+                operation="notify",
+                command_code=command_code,
+                satellite=satellite,
+                channel=channel,
+                response_timeout_sec=notification_timeout_sec,
+            )
+            print(
+                f"asynchronous telecommand notification succeeded: "
+                f"case_id={sim_case.case_id}, index={index + 1}, "
+                f"command_code={command_code}, "
+                f"request_id={notification.get('requestId')}"
+            )
 
             if _bool_config(item.get("sync_reset_start", False)):
                 reset_start_payload = self.udp_client.send_initial_condition(
@@ -256,37 +247,50 @@ class SimulationRunner:
                 print(
                     f"sent initial condition by UDP: "
                     f"case_id={sim_case.case_id}, reset=1, "
-                    f"bytes={len(reset_start_payload)}, sync_with={name}"
+                    f"bytes={len(reset_start_payload)}, "
+                    f"sync_with={command_code}"
                 )
 
-            if _bool_config(item.get("time_sync", False)):
-                payload = encode_time_sync_hex_source(
-                    hex_source=hex_source,
-                    condition=sim_case.initial_condition,
-                    placeholder_hex=str(item["time_placeholder_hex"]),
-                    epoch_year=epoch_year,
-                )
-            else:
-                payload = encode_hex_source(str(hex_source))
-
-            response = self.telecommand_client.send_payload(
-                payload=payload,
-                expect_response=expect_response,
-                append_newline=append_newline,
+            execution = self.telecommand_client.send_async_telecommand_request(
+                operation="execute",
+                command_code=command_code,
+                satellite=satellite,
+                channel=channel,
+                response_timeout_sec=execution_timeout_sec,
             )
             print(
-                f"sent telecommand by TCP: "
+                f"asynchronous telecommand execution succeeded: "
                 f"case_id={sim_case.case_id}, index={index + 1}, "
-                f"name={name}, bytes={len(payload)}"
+                f"command_code={command_code}, "
+                f"request_id={execution.get('requestId')}"
             )
-            if response is not None:
-                print(f"telecommand response: {response}")
 
         post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
         if post_delay_sec > 0:
             time.sleep(post_delay_sec)
 
         return reset_start_sent
+
+    @staticmethod
+    def _normalize_telecommand_item(item, index: int) -> dict:
+        if isinstance(item, str):
+            command_code = item.strip()
+            normalized = {"command_code": command_code}
+        elif isinstance(item, dict):
+            normalized = dict(item)
+            command_code = str(normalized.get("command_code", "")).strip()
+            normalized["command_code"] = command_code
+        else:
+            raise ValueError(
+                f"telecommand command item {index + 1} must be a string or "
+                f"mapping: {item!r}"
+            )
+
+        if not command_code:
+            raise ValueError(
+                f"telecommand command item {index + 1} is missing command_code"
+            )
+        return normalized
 
     def _resolve_telecommand_config(self, sim_case: SimulationCase) -> dict:
         config = dict(self.telecommand_config)
@@ -295,12 +299,10 @@ class SimulationRunner:
         if case_telecommand is None:
             return config
 
-        if isinstance(case_telecommand, dict) and (
-            "payload" in case_telecommand or "enabled" in case_telecommand
-        ):
+        if isinstance(case_telecommand, dict):
             config.update(case_telecommand)
         else:
-            config["payload"] = case_telecommand
+            config["command_code"] = case_telecommand
 
         return config
 

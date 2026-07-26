@@ -1,6 +1,5 @@
 import json
 import struct
-from datetime import datetime, timezone
 
 from src.models import InitialCondition, TelemetryFrame, TelemetryParameter
 
@@ -126,80 +125,6 @@ def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
 def encode_tcp_json_command(payload: dict) -> bytes:
     """Encode one TCP JSON command. The server requires one JSON object per line."""
     return json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
-
-
-def encode_tcp_payload(payload, append_newline: bool = True) -> bytes:
-    """
-    Encode one TCP application-layer payload.
-
-    JSON remains the protocol format for dict/list payloads. The return value is
-    bytes because Python sockets transmit bytes over TCP.
-    """
-    if isinstance(payload, bytes):
-        data = payload
-    elif isinstance(payload, bytearray):
-        data = bytes(payload)
-    elif isinstance(payload, (dict, list)):
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    else:
-        data = str(payload).encode("utf-8")
-
-    if append_newline and not data.endswith(b"\n"):
-        data += b"\n"
-
-    return data
-
-
-def encode_hex_source(hex_source: str) -> bytes:
-    compact = "".join(str(hex_source).split())
-    if compact.lower().startswith("0x"):
-        compact = compact[2:]
-    if len(compact) % 2 != 0:
-        raise ValueError("hex source length must be even")
-    return bytes.fromhex(compact)
-
-
-def initial_condition_seconds_since_epoch(
-    condition: InitialCondition,
-    epoch_year: int = 2006,
-) -> int:
-    date_time = condition.date_time
-    initial_time = datetime(
-        year=int(condition.year),
-        month=int(date_time["month"]),
-        day=int(date_time["date"]),
-        hour=int(date_time["hour"]),
-        minute=int(date_time["minute"]),
-        second=int(date_time["second"]),
-        tzinfo=timezone.utc,
-    )
-    epoch = datetime(epoch_year, 1, 1, tzinfo=timezone.utc)
-    seconds = int((initial_time - epoch).total_seconds())
-    if seconds < 0:
-        raise ValueError(
-            f"initial condition time must be after {epoch_year}-01-01 00:00:00"
-        )
-    return seconds
-
-
-def encode_time_sync_hex_source(
-    hex_source: str,
-    condition: InitialCondition,
-    placeholder_hex: str,
-    epoch_year: int = 2006,
-) -> bytes:
-    payload = encode_hex_source(hex_source)
-    placeholder = encode_hex_source(placeholder_hex)
-    seconds = initial_condition_seconds_since_epoch(condition, epoch_year=epoch_year)
-    encoded_seconds = seconds.to_bytes(4, byteorder="big", signed=False)
-
-    index = payload.find(placeholder)
-    if index < 0:
-        raise ValueError(
-            f"time placeholder {placeholder_hex} was not found in time-sync command"
-        )
-
-    return payload[:index] + encoded_seconds + payload[index + len(placeholder):]
 
 
 def decode_tcp_json_response(line: bytes) -> dict:

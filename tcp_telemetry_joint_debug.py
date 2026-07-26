@@ -5,7 +5,6 @@ import time
 
 from src.runner import load_yaml
 from src.tcp_telemetry_client import TcpTelemetryClient
-from src.protocols import encode_hex_source
 
 
 ENV_CONFIG_PATH = "config/env.yaml"
@@ -15,13 +14,6 @@ def parse_tm_codes(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def parse_payload(value: str):
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return value
 
 
 def build_client(args, use_telecommand_config: bool = False) -> TcpTelemetryClient:
@@ -203,106 +195,44 @@ def run_poll(client: TcpTelemetryClient, duration_sec: float | None) -> None:
             break
 
 
-def run_send(
+def run_async_telecommand(
     client: TcpTelemetryClient,
-    payload,
-    expect_response: bool,
-    append_newline: bool,
+    command_code: str,
+    satellite: str | None,
+    channel: str | None,
+    notification_timeout_sec: float,
+    execution_timeout_sec: float,
 ) -> None:
-    sock = client.open_connection()
-    byte_count = client.send_payload_on_connection(
-        sock=sock,
-        payload=payload,
-        append_newline=append_newline,
-    )
-    print(
-        f"sent payload bytes={byte_count}; connection will remain open "
-        f"until Ctrl+C or server close"
-    )
-    if expect_response:
-        close_reason, _ = client.receive_responses_until_closed(
-            sock,
-            on_response=print_json,
-        )
-    else:
-        close_reason = client.wait_until_closed(sock)
-    print(close_reason)
-
-
-def prepare_telecommand_sequence(telecommand_config: dict) -> list[tuple[str, bytes]]:
-    sequence = telecommand_config.get("sequence", [])
-    if not isinstance(sequence, list) or not sequence:
-        raise ValueError("telecommand.sequence must be a non-empty list")
-
-    prepared = []
-    for index, item in enumerate(sequence, start=1):
-        if not isinstance(item, dict):
-            raise ValueError(
-                f"telecommand sequence item {index} must be a mapping: {item!r}"
-            )
-
-        name = str(item.get("name", f"command_{index}"))
-        hex_source = item.get("hex")
-        if not hex_source:
-            raise ValueError(f"telecommand {name} is missing hex source")
-
-        prepared.append((name, encode_hex_source(str(hex_source))))
-
-    return prepared
-
-
-def run_send_sequence(
-    client: TcpTelemetryClient,
-    telecommand_config: dict,
-) -> None:
-    prepared = prepare_telecommand_sequence(telecommand_config)
-    initial_delay_sec = float(telecommand_config.get("initial_delay_sec", 0.0))
-    interval_sec = float(telecommand_config.get("interval_sec", 0.1))
-    post_delay_sec = float(telecommand_config.get("post_delay_sec", 0.0))
-    append_newline = bool(telecommand_config.get("append_newline", False))
-
-    sock = client.open_connection()
     print(f"connected to {client.host}:{client.port}")
-    print(
-        f"loaded {len(prepared)} telecommands; "
-        f"interval={interval_sec:.3f}s, append_newline={append_newline}"
+    notification = client.send_async_telecommand_request(
+        operation="notify",
+        command_code=command_code,
+        satellite=satellite,
+        channel=channel,
+        response_timeout_sec=notification_timeout_sec,
     )
+    print("notification succeeded:")
+    print_json(notification)
 
-    if initial_delay_sec > 0:
-        time.sleep(initial_delay_sec)
-
-    for index, (name, payload) in enumerate(prepared, start=1):
-        if index > 1 and interval_sec > 0:
-            time.sleep(interval_sec)
-
-        byte_count = client.send_payload_on_connection(
-            sock=sock,
-            payload=payload,
-            append_newline=append_newline,
-        )
-        print(
-            f"sent telecommand {index}/{len(prepared)}: "
-            f"name={name}, bytes={byte_count}"
-        )
-
-    if post_delay_sec > 0:
-        time.sleep(post_delay_sec)
-
-    print(
-        f"all {len(prepared)} telecommands sent; connection remains open "
-        f"until Ctrl+C or server close"
+    execution = client.send_async_telecommand_request(
+        operation="execute",
+        command_code=command_code,
+        satellite=satellite,
+        channel=channel,
+        response_timeout_sec=execution_timeout_sec,
     )
-    close_reason = client.wait_until_closed(sock)
-    print(close_reason)
+    print("execution succeeded:")
+    print_json(execution)
+    print("persistent telecommand connection remains open")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Joint-debug tool for TCP telemetry and binary telecommands."
+        description="Joint-debug tool for TCP telemetry and asynchronous telecommands."
     )
     parser.add_argument(
         "command",
-        choices=("ping", "get", "list", "poll", "send", "send-sequence"),
+        choices=("ping", "get", "list", "poll", "telecommand"),
         help="TCP telemetry command to run.",
     )
     parser.add_argument("--env", default=ENV_CONFIG_PATH)
@@ -319,27 +249,16 @@ def main() -> None:
         help="Optional poll duration; omit to run until Ctrl+C or server close.",
     )
     parser.add_argument("--interval", type=float, default=0.5)
-    parser.add_argument("--payload", help="JSON or raw text payload for send.")
-    parser.add_argument(
-        "--hex",
-        action="store_true",
-        help="Treat --payload as hex source and send binary bytes.",
-    )
-    parser.add_argument(
-        "--no-response",
-        action="store_true",
-        help="Do not wait for a TCP response after send.",
-    )
-    parser.add_argument(
-        "--no-newline",
-        action="store_true",
-        help="Do not append newline to the send payload.",
-    )
+    parser.add_argument("--command-code", help="Telecommand code for notify/execute.")
+    parser.add_argument("--satellite", help="Optional target satellite identifier.")
+    parser.add_argument("--channel", help="Optional asynchronous channel identifier.")
+    parser.add_argument("--notification-timeout", type=float)
+    parser.add_argument("--execution-timeout", type=float)
     args = parser.parse_args()
 
     client = build_client(
         args,
-        use_telecommand_config=args.command in {"send", "send-sequence"},
+        use_telecommand_config=args.command == "telecommand",
     )
 
     try:
@@ -358,25 +277,24 @@ def main() -> None:
             if not client.telemetry_poll_codes:
                 parser.error("--tm-codes or tcp.telemetry_poll_codes is required for poll")
             run_poll(client, args.duration)
-        elif args.command == "send":
-            if args.payload is None:
-                parser.error("--payload is required for send")
-            payload = (
-                encode_hex_source(args.payload)
-                if args.hex
-                else parse_payload(args.payload)
-            )
-            run_send(
-                client=client,
-                payload=payload,
-                expect_response=not args.no_response,
-                append_newline=not args.no_newline,
-            )
-        elif args.command == "send-sequence":
+        elif args.command == "telecommand":
+            if not args.command_code:
+                parser.error("--command-code is required for telecommand")
             env_config = load_yaml(args.env)
-            run_send_sequence(
+            telecommand_config = env_config.get("telecommand", {})
+            run_async_telecommand(
                 client=client,
-                telecommand_config=env_config.get("telecommand", {}),
+                command_code=args.command_code,
+                satellite=args.satellite or telecommand_config.get("satellite"),
+                channel=args.channel or telecommand_config.get("channel"),
+                notification_timeout_sec=float(
+                    args.notification_timeout
+                    or telecommand_config.get("notification_timeout_sec", 30.0)
+                ),
+                execution_timeout_sec=float(
+                    args.execution_timeout
+                    or telecommand_config.get("execution_timeout_sec", 60.0)
+                ),
             )
     except KeyboardInterrupt:
         print("interrupted by user; closing persistent TCP connection")

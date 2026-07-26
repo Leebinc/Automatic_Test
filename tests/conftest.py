@@ -122,6 +122,11 @@ def _degrees(value) -> str:
 def _failure_categories() -> list[dict]:
     return [
         {
+            "name": "异步遥控失败",
+            "matchedStatuses": ["failed"],
+            "messageRegex": ".*asynchronous telecommand.*failed.*",
+        },
+        {
             "name": "控制模态不匹配",
             "matchedStatuses": ["failed"],
             "messageRegex": ".*control mode mismatch.*",

@@ -1,8 +1,7 @@
+import json
+
 from src.runner import load_yaml
-from tcp_telemetry_joint_debug import (
-    parse_interactive_request,
-    prepare_telecommand_sequence,
-)
+from tcp_telemetry_joint_debug import parse_interactive_request
 
 
 def test_interactive_telemetry_commands():
@@ -17,20 +16,31 @@ def test_interactive_telemetry_commands():
     }
 
 
-def test_yaml_contains_eight_valid_telecommand_sources():
-    env_config = load_yaml("config/env.yaml")
-
-    prepared = prepare_telecommand_sequence(env_config["telecommand"])
-
-    assert len(prepared) == 8
-    assert [name for name, _ in prepared] == [
-        "K3072_battery_array_test",
-        "TEMP031_wheel_speed_clear",
-        "K3006_initial_state_soft_reset",
-        "ZS300_time_sync",
-        "K3139_actuator_output",
-        "K3117_allow_ground_hw_single_machine",
-        "TEMP041_receive_dynamics_gps",
-        "K3036_sun_acquisition_control",
+def test_each_case_contains_eight_telecommand_codes_without_source():
+    cases = load_yaml("config/cases.yaml")
+    expected_codes = [
+        "K3072",
+        "TEMP031",
+        "K3006",
+        "ZS300",
+        "K3139",
+        "K3117",
+        "TEMP041",
+        "K3036",
     ]
-    assert all(payload for _, payload in prepared)
+
+    for case in cases:
+        configured = case["telecommand"]["command_codes"]
+        actual_codes = [
+            item if isinstance(item, str) else item["command_code"]
+            for item in configured
+        ]
+        assert actual_codes == expected_codes
+
+    configuration_source = json.dumps(
+        {
+            "environment": load_yaml("config/env.yaml"),
+            "cases": cases,
+        }
+    )
+    assert '"hex"' not in configuration_source
