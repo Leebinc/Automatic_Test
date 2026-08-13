@@ -42,6 +42,11 @@ def test_frame_can_be_decoded_without_optional_angular_rate():
     assert frame.angular_rate_deg_s is None
     assert frame.control_mode == "3"
     assert frame.attitude_reference == "1"
+    assert frame.values["TMZK0014"] == 0.1
+    assert frame.values["TMZK0013_b7b4"] == 3
+    assert frame.values["roll"] == 0.1
+    assert frame.values["pitch"] == -0.2
+    assert frame.values["yaw"] == 0.3
 
 
 def test_frame_still_decodes_complete_optional_angular_rate():
@@ -59,3 +64,31 @@ def test_frame_still_decodes_complete_optional_angular_rate():
     )
 
     assert frame.angular_rate_deg_s == [0.01, -0.02, 0.03]
+
+
+def test_frame_decodes_generic_values_without_attitude_angles():
+    field_codes = {
+        "attitude_angle_deg": [],
+        "angular_rate_deg_s": [],
+        "control_mode": "MODE",
+    }
+    frame = decode_telemetry_response_frame(
+        response=response_with(
+            [parameter("VOLTAGE", 28.1), parameter("MODE", 3)]
+        ),
+        field_codes=field_codes,
+    )
+
+    assert frame.attitude_angle_deg == []
+    assert frame.values == {"VOLTAGE": 28.1, "MODE": 3}
+
+
+def test_frame_allows_partial_attitude_response_for_per_case_checks():
+    frame = decode_telemetry_response_frame(
+        response=response_with([parameter("TMZK0014", 0.4)]),
+        field_codes=FIELD_CODES,
+    )
+
+    assert frame.attitude_angle_deg == []
+    assert frame.values["TMZK0014"] == 0.4
+    assert frame.values["roll"] == 0.4

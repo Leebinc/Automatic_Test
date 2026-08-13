@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -13,19 +13,13 @@ class InitialCondition:
 
 
 @dataclass
-class ExpectedResult:
-    control_mode: str
-    attitude_angle_converged: bool
-    attitude_reference: str
-
-
-@dataclass
 class SimulationCase:
     case_id: str
     description: str
     initial_condition: InitialCondition
-    expected: ExpectedResult
+    checks: list[dict]
     telecommand: object | None = None
+    telemetry_codes: list[str] | None = None
 
 
 @dataclass
@@ -38,6 +32,7 @@ class TelemetryFrame:
     attitude_reference: str
     sim_status: str
     raw: dict
+    values: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

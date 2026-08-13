@@ -8,9 +8,9 @@ import yaml
 
 
 REPORT_GROUPS = {
-    "test_attitude_convergence.py": (
+    "test_telemetry_checks.py": (
         "半实物自动化测试",
-        "姿态角收敛、控制模态和姿态基准",
+        "遥测模式与收敛组合判据",
         allure.severity_level.CRITICAL,
     ),
     "test_tcp_telemetry_client.py": (
@@ -57,7 +57,7 @@ def allure_report_group(request):
 def pytest_collection_modifyitems(items):
     """Allow hardware and offline tests to be selected independently."""
     for item in items:
-        if item.path.name == "test_attitude_convergence.py":
+        if item.path.name == "test_telemetry_checks.py":
             item.add_marker(pytest.mark.hardware)
         else:
             item.add_marker(pytest.mark.offline)
@@ -81,8 +81,7 @@ def pytest_sessionstart(session):
         "Telemetry poll interval": _seconds(env.get("tcp", {}).get("poll_interval_sec")),
         "Case max duration": _seconds(env.get("simulation", {}).get("max_duration_sec")),
         "Case interval": _seconds(env.get("simulation", {}).get("case_interval_sec")),
-        "Convergence hold": _seconds(env.get("validation", {}).get("convergence_hold_sec")),
-        "Attitude threshold": _degrees(env.get("validation", {}).get("attitude_angle_threshold_deg")),
+        "Judgment delay": _seconds(env.get("validation", {}).get("judgment_delay_sec")),
     }
     property_text = "\n".join(
         f"{key}={value}" for key, value in properties.items()
@@ -137,9 +136,9 @@ def _failure_categories() -> list[dict]:
             "messageRegex": ".*attitude reference mismatch.*",
         },
         {
-            "name": "姿态角未收敛",
+            "name": "遥测判据未完成",
             "matchedStatuses": ["failed"],
-            "messageRegex": ".*attitude-angle convergence result mismatch.*",
+            "messageRegex": ".*checks did not complete.*",
         },
         {
             "name": "通信连接异常",

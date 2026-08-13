@@ -30,6 +30,8 @@ def test_each_case_contains_eight_telecommand_codes_without_source():
     ]
 
     for case in cases:
+        assert "expected" not in case
+        assert isinstance(case["checks"], list) and case["checks"]
         configured = case["telecommand"]["command_codes"]
         actual_codes = [
             item if isinstance(item, str) else item["command_code"]

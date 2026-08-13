@@ -2,7 +2,7 @@ import time
 
 import yaml
 
-from src.models import ExpectedResult, InitialCondition, SimulationCase
+from src.models import InitialCondition, SimulationCase
 from src.tcp_telemetry_client import TcpTelemetryClient
 from src.udp_client import UdpInitialConditionClient
 
@@ -17,13 +17,19 @@ def load_cases(path: str) -> list[SimulationCase]:
     cases = []
 
     for item in raw_cases:
+        checks = item.get("checks")
+        if not isinstance(checks, list) or not checks:
+            raise ValueError(
+                f"{item.get('case_id', '<unknown>')} checks must be a non-empty list"
+            )
         cases.append(
             SimulationCase(
                 case_id=item["case_id"],
                 description=item["description"],
                 initial_condition=InitialCondition(**item["initial_condition"]),
-                expected=ExpectedResult(**item["expected"]),
+                checks=checks,
                 telecommand=item.get("telecommand"),
+                telemetry_codes=item.get("telemetry_codes"),
             )
         )
 
@@ -145,7 +151,7 @@ class SimulationRunner:
             if self.post_udp_delay_sec > 0:
                 time.sleep(self.post_udp_delay_sec)
 
-            yield from self._receive_frames()
+            yield from self._receive_frames(sim_case)
         finally:
             self._last_case_end_time = time.monotonic()
 
@@ -306,10 +312,16 @@ class SimulationRunner:
 
         return config
 
-    def _receive_frames(self):
-        yield from self.tcp_client.receive_frames(
-            max_duration_sec=self.max_duration_sec
-        )
+    def _receive_frames(self, sim_case: SimulationCase):
+        original_codes = self.tcp_client.telemetry_poll_codes
+        if sim_case.telemetry_codes:
+            self.tcp_client.telemetry_poll_codes = list(sim_case.telemetry_codes)
+        try:
+            yield from self.tcp_client.receive_frames(
+                max_duration_sec=self.max_duration_sec
+            )
+        finally:
+            self.tcp_client.telemetry_poll_codes = original_codes
 
     def close(self) -> None:
         """Close persistent TCP connections when the test session is ending."""

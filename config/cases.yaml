@@ -49,10 +49,25 @@
       - "K3117"
       - "TEMP041"
       - "K3036"
-  expected:
-    control_mode: "3"
-    attitude_reference: "3"
-    attitude_angle_converged: true
+  checks:
+    - type: "mode"
+      mode: "control_mode"
+      name: "控制模态"
+      field: "control_mode"
+      expected: "3"
+      entry:
+        roll_pitch_abs_lt_deg: 1.0
+    - type: "mode"
+      mode: "attitude_reference"
+      name: "姿态选择基准"
+      field: "attitude_reference"
+      expected: "3"
+    - type: "convergence"
+      name: "三轴姿态角收敛"
+      fields: ["roll", "pitch", "yaw"]
+      targets: 0.0
+      tolerances: 0.5
+      hold_sec: 60.0
 
 - case_id: "case_002"
   description: "第二轮半实物仿真：阴影初期"
@@ -105,7 +120,22 @@
       - "K3117"
       - "TEMP041"
       - "K3036"
-  expected:
-    control_mode: "3"
-    attitude_reference: "1"
-    attitude_angle_converged: true
+  checks:
+    - type: "mode"
+      mode: "control_mode"
+      name: "控制模态"
+      field: "control_mode"
+      expected: "3"
+      entry:
+        roll_pitch_abs_lt_deg: 1.0
+    - type: "mode"
+      mode: "attitude_reference"
+      name: "姿态选择基准"
+      field: "attitude_reference"
+      expected: "1"
+    - type: "convergence"
+      name: "三轴姿态角收敛"
+      fields: ["roll", "pitch", "yaw"]
+      targets: 0.0
+      tolerances: 0.5
+      hold_sec: 60.0
