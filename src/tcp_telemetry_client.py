@@ -2,6 +2,7 @@ import socket
 import time
 import uuid
 from collections.abc import Iterator
+from threading import Event
 
 from src.models import TelemetryFrame
 from src.protocols import (
@@ -12,10 +13,12 @@ from src.protocols import (
 )
 
 
+#定义异步遥控异常，是RuntimeError的类继承
 class AsyncTelecommandError(RuntimeError):
     """Raised when an asynchronous notify/execute request does not succeed."""
 
 
+#TCP客户端（适用于遥控和遥测）
 class TcpTelemetryClient:
     def __init__(
         self,
@@ -24,27 +27,28 @@ class TcpTelemetryClient:
         timeout_sec: float = 2.0,
         recv_buffer_size: int = 4096,
         connect_retry_timeout_sec: float = 20.0,
-        connect_retry_interval_sec: float = 5,
+        connect_retry_interval_sec: float = 5.0,
         telemetry_poll_codes: list[str] | None = None,
         telemetry_frame_field_codes: dict | None = None,
         poll_interval_sec: float = 1.0,
         heartbeat_interval_sec: float | None = None,
     ):
-        self.host = host
-        self.port = port
-        self.timeout_sec = timeout_sec
-        self.recv_buffer_size = recv_buffer_size
-        self.connect_retry_timeout_sec = connect_retry_timeout_sec
-        self.connect_retry_interval_sec = connect_retry_interval_sec
-        self.telemetry_poll_codes = telemetry_poll_codes or []
-        self.telemetry_frame_field_codes = telemetry_frame_field_codes or {}
-        self.poll_interval_sec = poll_interval_sec
-        self.heartbeat_interval_sec = heartbeat_interval_sec
-        self._socket: socket.socket | None = None
-        self._receive_buffer = b""
-        self._pending_async_responses: dict[str, dict] = {}
+        self.host = host                                                             #客户端IP
+        self.port = port                                                             #客户端端口号
+        self.timeout_sec = timeout_sec                                               #超时设置，默认2.0s
+        self.recv_buffer_size = recv_buffer_size                                     #处理TCP粘包的缓冲区大小，默认4KB
+        self.connect_retry_timeout_sec = connect_retry_timeout_sec                   #最大连接时长，默认20.0s
+        self.connect_retry_interval_sec = connect_retry_interval_sec                 #单次连接超时后重新连接设置，默认5.0s
+        self.telemetry_poll_codes = telemetry_poll_codes or []                       #遥测轮询代号列表（协议）
+        self.telemetry_frame_field_codes = telemetry_frame_field_codes or {}         #遥测框架字典（自设）
+        self.poll_interval_sec = poll_interval_sec                                   #遥测轮询间隔时长，默认1.0s
+        self.heartbeat_interval_sec = heartbeat_interval_sec                         #TCP连接心跳响应间隔，默认为None
+        self._socket: socket.socket | None = None                                    #持久TCP连接，默认为None
+        self._receive_buffer = b""                                                   #未解析完的TCP数据
+        self._pending_async_responses: dict[str, dict] = {}                          #提前收到或不属于当前请求的异步遥控响应
 
-    # 底层连接方法
+
+    #创建TCP连接, 在限定时间内重试
     def _connect(self) -> socket.socket:
         deadline = time.monotonic() + self.connect_retry_timeout_sec
         last_error = None
@@ -70,21 +74,25 @@ class TcpTelemetryClient:
             f"{self.connect_retry_timeout_sec}s"
         ) from last_error
 
-    # 心跳响应
+
+    #发送心跳响应请求命令并等待回应
     def ping(self) -> dict:
         return self.request_once({"cmd": "ping"})
 
-    # 获取单条遥测
+    #请求单条遥测
     def get_parameter(self, tm_code: str):
         response = self.request_once({"cmd": "get", "tmCode": tm_code})
         parameters = decode_telemetry_response_parameters(response)
         return parameters[0] if parameters else None
 
-    # 获取多条遥测
+
+    #请求多条遥测
     def list_parameters(self, tm_codes: list[str]):
         response = self.request_once({"cmd": "list", "tmCodes": tm_codes})
         return decode_telemetry_response_parameters(response)
 
+
+    #发送notify或execute遥控请求, 并等待对应结果
     def send_async_telecommand_request(
         self,
         operation: str,
@@ -157,6 +165,7 @@ class TcpTelemetryClient:
 
         return response
 
+    #等待指定requestID结果, 若不是期望requestID则存储在self._pending_async_responses
     def _wait_for_async_response(
         self,
         sock: socket.socket,
@@ -185,7 +194,7 @@ class TcpTelemetryClient:
 
             self._pending_async_responses[response_request_id] = response
 
-    # 发送一次请求，读取一次响应
+    #发送命令——等待响应, 使用类自己的socket
     def request_once(self, command: dict) -> dict:
         sock = self.open_connection()
         self._send_command(sock, command)
@@ -195,7 +204,8 @@ class TcpTelemetryClient:
         )
         return response
 
-    # 获取持久连接
+
+    #返回当前持久连接
     def open_connection(self) -> socket.socket:
         """Return the process-level persistent TCP connection."""
         if self._socket is None or self._socket.fileno() < 0:
@@ -203,7 +213,7 @@ class TcpTelemetryClient:
             self._receive_buffer = b""
         return self._socket
 
-    # 主动关闭连接
+    #主动关闭客户端
     def close(self) -> None:
         """Close the persistent connection when the client process is ending."""
         sock = self._socket
@@ -220,7 +230,7 @@ class TcpTelemetryClient:
         finally:
             sock.close()
 
-    # 调用已存在的socket
+    #使用调用方提供的socket, socket可由外部传入
     def request_on_connection(
         self,
         sock: socket.socket,
@@ -231,7 +241,7 @@ class TcpTelemetryClient:
         self._send_command(sock, command)
         return self._receive_response(sock, buffer)
 
-    # 发送命令，不等待响应
+    #发送命令，不等待响应
     def send_command_on_connection(
         self,
         sock: socket.socket,
@@ -240,7 +250,7 @@ class TcpTelemetryClient:
         """Send one JSON command without requiring a response."""
         self._send_command(sock, command)
 
-    # 持续从socket接收Json响应，直至stop_event被设置/服务端关闭连接/socket出现错误
+    #持续从socket接收Json响应, 直至stop_event被设置(ctrl+c)/服务端关闭连接/socket出现错误
     def receive_responses_until_closed(
         self,
         sock: socket.socket,
@@ -277,7 +287,7 @@ class TcpTelemetryClient:
             if sock is self._socket:
                 self._receive_buffer = buffer
 
-    # 保持连接并等待服务器断开
+    #保持连接并等待服务器断开
     def wait_until_closed(self, sock: socket.socket) -> str:
         """Keep a connection open until interrupted or the peer closes it."""
         received_bytes = 0
@@ -299,7 +309,7 @@ class TcpTelemetryClient:
             received_bytes += len(data)
             print(f"received {len(data)} unexpected bytes (total={received_bytes})")
 
-    # 持续接收模式下消息拆包
+    #从缓冲区解析尽可能多的消息
     def _dispatch_json_responses(self, buffer: bytes, on_response) -> tuple[bytes, int]:
         response_count = 0
 
@@ -323,7 +333,7 @@ class TcpTelemetryClient:
 
         return buffer, response_count
 
-    # 异常断连的内部清理方法， 标记连接失效， 清理内部异常连接
+    #socket出错或关闭时清理内部状态
     def _mark_disconnected(self, sock: socket.socket) -> None:
         if sock is not self._socket:
             return
@@ -334,17 +344,12 @@ class TcpTelemetryClient:
             self._receive_buffer = b""
             self._pending_async_responses.clear()
 
-    # 发送任意负载
-    # Legacy raw-payload telecommand sending was removed. Telecommands must use
-    # send_async_telecommand_request() with a configured commandCode.
 
-    # 调用编码函数得到字节流，完整发送后返回字节长度
-    # JSON protocol commands are encoded and newline-terminated by _send_command.
-
-    # 遥测帧轮询
+    #遥测帧轮询
     def receive_frames(
         self,
         max_duration_sec: float | None = None,
+        stop_event: Event | None = None,
     ) -> Iterator[TelemetryFrame]:
         if not self.telemetry_poll_codes:
             raise ValueError(
@@ -352,14 +357,21 @@ class TcpTelemetryClient:
                 "request-response telemetry protocol"
             )
 
-        yield from self._poll_frames(max_duration_sec=max_duration_sec)
+        yield from self._poll_frames(
+            max_duration_sec=max_duration_sec,
+            stop_event=stop_event,
+        )
 
-    # 遥测轮询
+    #遥测轮询
     def _poll_frames(
         self,
         max_duration_sec: float | None = None,
+        stop_event: Event | None = None,
     ) -> Iterator[TelemetryFrame]:
         command = {"cmd": "list", "tmCodes": self.telemetry_poll_codes}
+        if stop_event is not None and stop_event.is_set():
+            return
+
         sock = self.open_connection()
         start_time = time.monotonic()
         operation_deadline = (
@@ -373,6 +385,8 @@ class TcpTelemetryClient:
 
         while True:
             now = time.monotonic()
+            if stop_event is not None and stop_event.is_set():
+                return
             if operation_deadline is not None and now >= operation_deadline:
                 return
 
@@ -387,6 +401,8 @@ class TcpTelemetryClient:
             receive_deadline = next_poll_time
             if operation_deadline is not None:
                 receive_deadline = min(receive_deadline, operation_deadline)
+            if stop_event is not None:
+                receive_deadline = min(receive_deadline, now + 0.5)
 
             response, self._receive_buffer = self._receive_response_until(
                 sock,
@@ -396,8 +412,7 @@ class TcpTelemetryClient:
             if response is None:
                 continue
 
-            if self._is_heartbeat_response(response):
-                self._validate_heartbeat_response(response)
+            if self._handle_heartbeat_response(response):
                 continue
 
             frame = decode_telemetry_response_frame(
@@ -409,7 +424,7 @@ class TcpTelemetryClient:
             frame.timestamp_sec = time.monotonic() - start_time
             yield frame
 
-    # 返回心跳是否到期
+    #返回心跳是否到期
     def _heartbeat_due(self, now: float, last_heartbeat_time: float) -> bool:
         return (
             self.heartbeat_interval_sec is not None
@@ -417,24 +432,32 @@ class TcpTelemetryClient:
             and now - last_heartbeat_time >= self.heartbeat_interval_sec
         )
 
-    # 检测心跳响应是否正常
-    def _validate_heartbeat_response(self, response: dict) -> None:
-        code = int(response.get("code", -1))
+    #识别并校验心跳响应；非心跳返回False，合法心跳返回True，非法心跳抛错
+    def _handle_heartbeat_response(self, response: dict) -> bool:
+        if str(response.get("msg", "")).strip().lower() != "pong":
+            return False
+
+        try:
+            code = int(response.get("code", -1))
+        except (TypeError, ValueError) as exc:
+            raise ConnectionError(
+                f"TCP telemetry heartbeat returned an invalid code: {response!r}"
+            ) from exc
+
         if code != 0:
             raise ConnectionError(
                 f"TCP telemetry heartbeat failed: "
                 f"code={code}, msg={response.get('msg', '')}"
             )
 
-    # 心跳响应返回值
-    def _is_heartbeat_response(self, response: dict) -> bool:
-        return (
-            int(response.get("code", -1)) == 0
-            and str(response.get("msg", "")).lower() == "pong"
-            and response.get("data") in (None, [], {})
-        )
+        data = response.get("data")
+        if data not in (None, [], {}):
+            raise ConnectionError(
+                f"TCP telemetry heartbeat returned unexpected data: {data!r}"
+            )
+        return True
 
-    # 底层命令发送
+    #底层命令发送
     def _send_command(self, sock: socket.socket, command: dict) -> None:
         try:
             sock.sendall(encode_tcp_json_command(command))
@@ -442,7 +465,7 @@ class TcpTelemetryClient:
             self._mark_disconnected(sock)
             raise
 
-    # 阻塞式响应接收，保证返回一条完整的换行分隔 JSON 响应
+    #阻塞式响应接收，保证返回一条完整的换行分隔 JSON 响应
     def _receive_response(
         self,
         sock: socket.socket,
@@ -479,7 +502,7 @@ class TcpTelemetryClient:
 
         return decode_tcp_json_response(line), buffer
 
-    # 有截止时间的可选接收，不一定收到响应
+    #有截止时间的可选接收，不一定收到响应
     def _receive_response_until(
         self,
         sock: socket.socket,

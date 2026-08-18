@@ -40,69 +40,35 @@ def frame_value(frame: TelemetryFrame, field: str):
     raise ValueError(f"telemetry frame has no value for field/tmCode: {field}")
 
 
-def update_control_mode_check(
-    frame: TelemetryFrame,
-    check: dict,
-    state: CheckState,
-    case_id: str,
-) -> None:
-    """Control-mode entry rule: roll and pitch must enter the configured range."""
-    entry = check.get("entry", {})
-    threshold = float(entry["roll_pitch_abs_lt_deg"])
-    if not state.started:
-        roll = float(frame_value(frame, "roll"))
-        pitch = float(frame_value(frame, "pitch"))
-        state.started = abs(roll) < threshold and abs(pitch) < threshold
-
-    if not state.started:
-        return
-
-    _assert_mode_value(
-        actual=frame_value(frame, check.get("field", "control_mode")),
-        expected=check["expected"],
-        case_id=case_id,
-        check_name=check.get("name", "control_mode"),
-        timestamp_sec=frame.timestamp_sec,
-    )
-    state.satisfied = True
-
-
-def update_attitude_reference_check(
-    frame: TelemetryFrame,
-    check: dict,
-    state: CheckState,
-    case_id: str,
-) -> None:
-    """Attitude-reference rule: start on the first frame after the global delay."""
-    state.started = True
-    _assert_mode_value(
-        actual=frame_value(frame, check.get("field", "attitude_reference")),
-        expected=check["expected"],
-        case_id=case_id,
-        check_name=check.get("name", "attitude_reference"),
-        timestamp_sec=frame.timestamp_sec,
-    )
-    state.satisfied = True
-
-
-MODE_CHECK_HANDLERS = {
-    "control_mode": update_control_mode_check,
-    "attitude_reference": update_attitude_reference_check,
-}
-
-
 def update_mode_check(
     frame: TelemetryFrame,
     check: dict,
     state: CheckState,
     case_id: str,
 ) -> None:
-    mode = str(check.get("mode", ""))
-    try:
-        handler = MODE_CHECK_HANDLERS[mode]
-    except KeyError as exc:
-        raise ValueError(f"unsupported mode check: {mode!r}") from exc
-    handler(frame=frame, check=check, state=state, case_id=case_id)
+    """Apply one declarative entry rule and then continuously verify a mode."""
+    field = str(check.get("field", "")).strip()
+    if not field:
+        raise ValueError("mode check field must be configured")
+    if "expected" not in check:
+        raise ValueError(f"mode check {field!r} expected value must be configured")
+
+    if not state.started:
+        state.started = _mode_start_conditions_met(
+            frame=frame,
+            start_when=check.get("start_when"),
+        )
+    if not state.started:
+        return
+
+    _assert_mode_value(
+        actual=frame_value(frame, field),
+        expected=check["expected"],
+        case_id=case_id,
+        check_name=check.get("name", field),
+        timestamp_sec=frame.timestamp_sec,
+    )
+    state.satisfied = True
 
 
 def update_convergence_check(
@@ -186,11 +152,92 @@ def _assert_mode_value(
 ) -> None:
     if str(actual) != str(expected):
         raise AssertionError(
-            f"{case_id} {check_name} mismatch; "
+            f"{case_id} mode check {check_name} mismatch; "
             f"expected_engineering_value={expected}, "
             f"actual_engineering_value={actual}, "
             f"t={timestamp_sec:.3f}s"
         )
+
+
+def _mode_start_conditions_met(
+    frame: TelemetryFrame,
+    start_when,
+) -> bool:
+    """Evaluate a safe, declarative all/any group of entry conditions."""
+    if start_when is None:
+        return True
+    if not isinstance(start_when, dict):
+        raise ValueError("mode check start_when must be a mapping")
+
+    match = str(start_when.get("match", "all")).strip().lower()
+    if match not in {"all", "any"}:
+        raise ValueError("mode check start_when.match must be 'all' or 'any'")
+
+    conditions = start_when.get("conditions", [])
+    if not isinstance(conditions, list):
+        raise ValueError("mode check start_when.conditions must be a list")
+    if not conditions:
+        return True
+
+    results = [
+        _mode_start_condition_met(frame=frame, condition=condition)
+        for condition in conditions
+    ]
+    return all(results) if match == "all" else any(results)
+
+
+def _mode_start_condition_met(
+    frame: TelemetryFrame,
+    condition,
+) -> bool:
+    if not isinstance(condition, dict):
+        raise ValueError("each mode start condition must be a mapping")
+
+    field = str(condition.get("field", "")).strip()
+    operator = str(condition.get("operator", "")).strip().lower()
+    if not field:
+        raise ValueError("mode start condition field must be configured")
+    if "value" not in condition:
+        raise ValueError(
+            f"mode start condition {field!r} value must be configured"
+        )
+
+    actual = frame_value(frame, field)
+    expected = condition["value"]
+    if operator == "eq":
+        return str(actual) == str(expected)
+    if operator == "ne":
+        return str(actual) != str(expected)
+
+    supported_numeric_operators = {
+        "lt",
+        "le",
+        "gt",
+        "ge",
+        "abs_lt",
+        "abs_le",
+    }
+    if operator not in supported_numeric_operators:
+        supported = "eq, ne, lt, le, gt, ge, abs_lt, abs_le"
+        raise ValueError(
+            f"unsupported mode start condition operator {operator!r}; "
+            f"supported operators: {supported}"
+        )
+
+    actual_number = float(actual)
+    expected_number = float(expected)
+    if operator.startswith("abs_") and expected_number < 0:
+        raise ValueError("absolute mode start condition value must not be negative")
+
+    comparisons = {
+        "lt": actual_number < expected_number,
+        "le": actual_number <= expected_number,
+        "gt": actual_number > expected_number,
+        "ge": actual_number >= expected_number,
+        "abs_lt": abs(actual_number) < expected_number,
+        "abs_le": abs(actual_number) <= expected_number,
+    }
+    return comparisons[operator]
 
 
 def _is_within_tolerance(actual: float, target: float, tolerance: float) -> bool:

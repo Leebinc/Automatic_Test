@@ -57,11 +57,13 @@ CONFIG_FIELD_ORDER = (
 )
 
 
+# 计算累加校验和，取低16位
 def calculate_uint16_checksum(data: bytes) -> int:
     """Return the low 16 bits of the unsigned byte sum."""
     return sum(data) & 0xFFFF
 
 
+# 把Initialcondition编码为固定二进制字节
 def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
     missing_orbit_fields = [
         field for field in ORBIT_FIELD_ORDER if field not in condition.orbit
@@ -122,15 +124,18 @@ def encode_initial_condition(condition: InitialCondition, reset: bool) -> bytes:
     return body
 
 
+#把python字典编码为UTF-8 Json字节
 def encode_tcp_json_command(payload: dict) -> bytes:
     """Encode one TCP JSON command. The server requires one JSON object per line."""
     return json.dumps(payload, ensure_ascii=False).encode("utf-8") + b"\n"
 
 
+#把一行UTF-8 Jason字节转换为python字典
 def decode_tcp_json_response(line: bytes) -> dict:
     return json.loads(line.decode("utf-8"))
 
 
+#把服务器返回的单个遥测参数字典转换为TelemetrypParameter对象
 def decode_telemetry_parameter(payload: dict) -> TelemetryParameter:
     return TelemetryParameter(
         tm_code=str(payload.get("tmCode", "")),
@@ -147,6 +152,7 @@ def decode_telemetry_parameter(payload: dict) -> TelemetryParameter:
     )
 
 
+#把服务器返回的多个遥测参数字典转换为TelemetrypParameter对象的列表
 def decode_telemetry_response_parameters(response: dict) -> list[TelemetryParameter]:
     code = int(response.get("code", -1))
     if code != 0:
@@ -170,6 +176,7 @@ def decode_telemetry_response_parameters(response: dict) -> list[TelemetryParame
     ]
 
 
+#把一批遥测参数转换为已定义的TelemetryFrame对象
 def decode_telemetry_response_frame(
     response: dict,
     field_codes: dict | None = None,
@@ -251,6 +258,7 @@ def decode_telemetry_response_frame(
     )
 
 
+#处理三轴姿态角度
 def _optional_required_three_axis_values(
     by_code: dict[str, TelemetryParameter],
     field_codes,
@@ -281,6 +289,7 @@ def _optional_required_three_axis_values(
     return [float(item.value) for item in items]
 
 
+#处理三轴姿态角速度（可选，非必须）
 def _optional_three_axis_values(
     by_code: dict[str, TelemetryParameter],
     field_codes,
@@ -310,6 +319,7 @@ def _optional_three_axis_values(
     return [float(item.value) for item in items]
 
 
+#给对应遥测码增加通用轴名称别名
 def _add_axis_aliases(
     values: dict[str, object],
     by_code: dict[str, TelemetryParameter],
@@ -331,6 +341,7 @@ def _add_axis_aliases(
             values.setdefault(alias, item.value)
 
 
+#可选值转换为整形
 def _optional_int(value) -> int | None:
     if value is None:
         return None

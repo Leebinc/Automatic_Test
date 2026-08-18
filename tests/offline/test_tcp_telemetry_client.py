@@ -1,6 +1,7 @@
 import json
 import socket
 import threading
+import time
 
 import pytest
 
@@ -221,6 +222,65 @@ def test_polling_resends_requests_when_server_does_not_respond():
     finally:
         client.close()
         server_sock.close()
+
+
+def test_polling_stops_before_opening_connection_when_event_is_already_set():
+    client = TcpTelemetryClient(
+        host="127.0.0.1",
+        port=9000,
+        telemetry_poll_codes=["ROLL"],
+    )
+    stop_event = threading.Event()
+    stop_event.set()
+
+    assert list(client.receive_frames(stop_event=stop_event)) == []
+    assert client._socket is None
+
+
+def test_polling_observes_event_while_server_remains_silent():
+    client = TcpTelemetryClient(
+        host="127.0.0.1",
+        port=9000,
+        timeout_sec=0.01,
+        poll_interval_sec=2.0,
+        telemetry_poll_codes=["ROLL"],
+    )
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+    stop_event = threading.Event()
+    stop_timer = threading.Timer(0.03, stop_event.set)
+    start_time = time.monotonic()
+    stop_timer.start()
+
+    try:
+        assert list(client.receive_frames(stop_event=stop_event)) == []
+        assert time.monotonic() - start_time < 1.0
+        assert client.open_connection() is client_sock
+    finally:
+        stop_timer.join()
+        client.close()
+        server_sock.close()
+
+
+def test_heartbeat_response_is_identified_and_validated_once():
+    client = make_client()
+
+    assert client._handle_heartbeat_response(
+        {"code": 0, "msg": " PONG ", "data": None}
+    )
+    assert not client._handle_heartbeat_response(
+        {"code": 0, "msg": "success", "data": []}
+    )
+
+    with pytest.raises(ConnectionError, match="heartbeat failed"):
+        client._handle_heartbeat_response(
+            {"code": 1, "msg": "pong", "data": None}
+        )
+
+    with pytest.raises(ConnectionError, match="unexpected data"):
+        client._handle_heartbeat_response(
+            {"code": 0, "msg": "pong", "data": [{"unexpected": True}]}
+        )
 
 
 def test_receive_only_peer_does_not_trigger_client_idle_disconnect():

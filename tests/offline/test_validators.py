@@ -8,7 +8,7 @@ from tests.validators import (
     should_start_judgment,
     update_check,
     update_convergence_check,
-    update_control_mode_check,
+    update_mode_check,
 )
 
 
@@ -133,25 +133,40 @@ def test_completed_convergence_is_latched():
     assert state.satisfied
 
 
-def test_control_mode_has_its_own_entry_rule_and_remains_monitored():
+def test_unified_mode_check_waits_for_all_conditions_and_remains_monitored():
     check = {
         "type": "mode",
-        "mode": "control_mode",
         "name": "control mode",
         "field": "control_mode",
         "expected": "3",
-        "entry": {"roll_pitch_abs_lt_deg": 6.0},
+        "start_when": {
+            "match": "all",
+            "conditions": [
+                {"field": "roll", "operator": "abs_lt", "value": 6.0},
+                {"field": "pitch", "operator": "abs_lt", "value": 6.0},
+            ],
+        },
     }
     state = CheckState()
 
-    update_control_mode_check(make_frame(0.0, [7.0, 0.0, 0.0], "2"), check, state, "case")
+    update_mode_check(
+        make_frame(0.0, [7.0, 0.0, 0.0], "2"),
+        check,
+        state,
+        "case",
+    )
     assert not state.started
 
-    update_control_mode_check(make_frame(2.0, [5.0, -5.0, 90.0], "3"), check, state, "case")
+    update_mode_check(
+        make_frame(2.0, [5.0, -5.0, 90.0], "3"),
+        check,
+        state,
+        "case",
+    )
     assert state.started and state.satisfied
 
     with pytest.raises(AssertionError, match="control mode mismatch"):
-        update_control_mode_check(
+        update_mode_check(
             make_frame(4.0, [8.0, 8.0, 0.0], "2"),
             check,
             state,
@@ -159,10 +174,9 @@ def test_control_mode_has_its_own_entry_rule_and_remains_monitored():
         )
 
 
-def test_attitude_reference_is_a_separate_mode_handler():
+def test_unified_mode_check_starts_immediately_without_start_conditions():
     check = {
         "type": "mode",
-        "mode": "attitude_reference",
         "name": "attitude reference",
         "field": "attitude_reference",
         "expected": "1",
@@ -177,6 +191,60 @@ def test_attitude_reference_is_a_separate_mode_handler():
     )
 
     assert state.started and state.satisfied
+
+
+def test_unified_mode_check_supports_any_condition_and_raw_tm_code():
+    check = {
+        "type": "mode",
+        "name": "arbitrary mode",
+        "field": "TM_MODE_CUSTOM",
+        "expected": "SAFE",
+        "start_when": {
+            "match": "any",
+            "conditions": [
+                {"field": "SENSOR_A", "operator": "ge", "value": 10.0},
+                {"field": "SENSOR_B", "operator": "eq", "value": "READY"},
+            ],
+        },
+    }
+    state = CheckState()
+
+    update_mode_check(
+        make_frame(
+            10.0,
+            values={
+                "TM_MODE_CUSTOM": "SAFE",
+                "SENSOR_A": 1.0,
+                "SENSOR_B": "READY",
+            },
+        ),
+        check,
+        state,
+        "case",
+    )
+
+    assert state.started and state.satisfied
+
+
+def test_unified_mode_check_rejects_unsupported_condition_operator():
+    check = {
+        "type": "mode",
+        "field": "control_mode",
+        "expected": "3",
+        "start_when": {
+            "conditions": [
+                {"field": "roll", "operator": "approximately", "value": 1.0}
+            ]
+        },
+    }
+
+    with pytest.raises(ValueError, match="unsupported.*operator"):
+        update_mode_check(
+            make_frame(10.0, [0.0, 0.0, 0.0]),
+            check,
+            CheckState(),
+            "case",
+        )
 
 
 def test_assert_checks_completed_lists_every_incomplete_check():

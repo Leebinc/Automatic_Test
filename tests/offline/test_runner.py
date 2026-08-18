@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from threading import Event
 
 import pytest
 
@@ -161,3 +162,28 @@ def test_runner_stops_case_after_execution_failure(monkeypatch):
         ("notify", "K3036"),
         ("execute", "K3036"),
     ]
+
+
+def test_runner_passes_stop_event_to_telemetry_client_and_restores_codes():
+    received = {}
+
+    class FakeTelemetryClient:
+        def __init__(self):
+            self.telemetry_poll_codes = ["DEFAULT"]
+
+        def receive_frames(self, **kwargs):
+            received.update(kwargs)
+            return iter(())
+
+    runner = SimulationRunner.__new__(SimulationRunner)
+    runner.tcp_client = FakeTelemetryClient()
+    runner.max_duration_sec = 300.0
+    stop_event = Event()
+    sim_case = SimpleNamespace(telemetry_codes=["ROLL", "PITCH"])
+
+    assert list(runner._receive_frames(sim_case, stop_event=stop_event)) == []
+    assert received == {
+        "max_duration_sec": 300.0,
+        "stop_event": stop_event,
+    }
+    assert runner.tcp_client.telemetry_poll_codes == ["DEFAULT"]

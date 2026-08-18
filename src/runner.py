@@ -1,4 +1,5 @@
 import time
+from threading import Event
 
 import yaml
 
@@ -119,7 +120,11 @@ class SimulationRunner:
         )
         self._last_case_end_time = None
 
-    def iter_frames(self, sim_case: SimulationCase):
+    def iter_frames(
+        self,
+        sim_case: SimulationCase,
+        stop_event: Event | None = None,
+    ):
         """Prepare one case and yield telemetry frames without judging them."""
         self._wait_for_case_interval()
         try:
@@ -151,7 +156,7 @@ class SimulationRunner:
             if self.post_udp_delay_sec > 0:
                 time.sleep(self.post_udp_delay_sec)
 
-            yield from self._receive_frames(sim_case)
+            yield from self._receive_frames(sim_case, stop_event=stop_event)
         finally:
             self._last_case_end_time = time.monotonic()
 
@@ -167,9 +172,13 @@ class SimulationRunner:
         print(f"waiting {remaining_sec:.3f}s before the next test case")
         time.sleep(remaining_sec)
 
-    def run_once(self, sim_case: SimulationCase):
+    def run_once(
+        self,
+        sim_case: SimulationCase,
+        stop_event: Event | None = None,
+    ):
         """Compatibility helper that collects frames without judging them."""
-        frames = list(self.iter_frames(sim_case))
+        frames = list(self.iter_frames(sim_case, stop_event=stop_event))
         print(f"received telemetry frames: {len(frames)}")
         return frames
 
@@ -312,13 +321,18 @@ class SimulationRunner:
 
         return config
 
-    def _receive_frames(self, sim_case: SimulationCase):
+    def _receive_frames(
+        self,
+        sim_case: SimulationCase,
+        stop_event: Event | None = None,
+    ):
         original_codes = self.tcp_client.telemetry_poll_codes
         if sim_case.telemetry_codes:
             self.tcp_client.telemetry_poll_codes = list(sim_case.telemetry_codes)
         try:
             yield from self.tcp_client.receive_frames(
-                max_duration_sec=self.max_duration_sec
+                max_duration_sec=self.max_duration_sec,
+                stop_event=stop_event,
             )
         finally:
             self.tcp_client.telemetry_poll_codes = original_codes

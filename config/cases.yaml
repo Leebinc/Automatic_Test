@@ -51,14 +51,19 @@
       - "K3036"
   checks:
     - type: "mode"
-      mode: "control_mode"
       name: "控制模态"
       field: "control_mode"
       expected: "3"
-      entry:
-        roll_pitch_abs_lt_deg: 1.0
+      start_when:
+        match: "all"
+        conditions:
+          - field: "roll"
+            operator: "abs_lt"
+            value: 1.0
+          - field: "pitch"
+            operator: "abs_lt"
+            value: 1.0
     - type: "mode"
-      mode: "attitude_reference"
       name: "姿态选择基准"
       field: "attitude_reference"
       expected: "3"
@@ -122,14 +127,19 @@
       - "K3036"
   checks:
     - type: "mode"
-      mode: "control_mode"
       name: "控制模态"
       field: "control_mode"
       expected: "3"
-      entry:
-        roll_pitch_abs_lt_deg: 1.0
+      start_when:
+        match: "all"
+        conditions:
+          - field: "roll"
+            operator: "abs_lt"
+            value: 1.0
+          - field: "pitch"
+            operator: "abs_lt"
+            value: 1.0
     - type: "mode"
-      mode: "attitude_reference"
       name: "姿态选择基准"
       field: "attitude_reference"
       expected: "1"

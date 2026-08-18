@@ -7,6 +7,9 @@ import pytest
 import yaml
 
 
+OFFLINE_TEST_DIR = (Path(__file__).parent / "offline").resolve()
+
+
 REPORT_GROUPS = {
     "test_telemetry_checks.py": (
         "半实物自动化测试",
@@ -55,12 +58,12 @@ def allure_report_group(request):
 
 
 def pytest_collection_modifyitems(items):
-    """Allow hardware and offline tests to be selected independently."""
+    """Derive markers from the physical hardware/offline directory split."""
     for item in items:
-        if item.path.name == "test_telemetry_checks.py":
-            item.add_marker(pytest.mark.hardware)
-        else:
+        if Path(item.path).resolve().is_relative_to(OFFLINE_TEST_DIR):
             item.add_marker(pytest.mark.offline)
+        else:
+            item.add_marker(pytest.mark.hardware)
 
 
 def pytest_sessionstart(session):
@@ -126,14 +129,9 @@ def _failure_categories() -> list[dict]:
             "messageRegex": ".*asynchronous telecommand.*failed.*",
         },
         {
-            "name": "控制模态不匹配",
+            "name": "模式工程值不匹配",
             "matchedStatuses": ["failed"],
-            "messageRegex": ".*control mode mismatch.*",
-        },
-        {
-            "name": "姿态选择基准不匹配",
-            "matchedStatuses": ["failed"],
-            "messageRegex": ".*attitude reference mismatch.*",
+            "messageRegex": ".*mode check .* mismatch.*",
         },
         {
             "name": "遥测判据未完成",
