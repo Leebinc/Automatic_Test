@@ -187,3 +187,54 @@ def test_runner_passes_stop_event_to_telemetry_client_and_restores_codes():
         "stop_event": stop_event,
     }
     assert runner.tcp_client.telemetry_poll_codes == ["DEFAULT"]
+
+
+def test_telecommand_keepalive_runs_after_start_and_stops_cleanly():
+    heartbeat_called = Event()
+
+    class FakeTelecommandClient:
+        timeout_sec = 0.01
+
+        def heartbeat(self):
+            heartbeat_called.set()
+
+    runner = SimulationRunner.__new__(SimulationRunner)
+    runner.telecommand_client = FakeTelecommandClient()
+    runner.telecommand_heartbeat_interval_sec = 0.01
+
+    runner._start_telecommand_keepalive()
+    try:
+        assert heartbeat_called.wait(timeout=0.5)
+        runner._raise_telecommand_keepalive_error()
+    finally:
+        runner._stop_telecommand_keepalive()
+
+
+def test_telecommand_keepalive_error_is_reported_to_test_thread():
+    heartbeat_attempted = Event()
+
+    class FailingTelecommandClient:
+        timeout_sec = 0.01
+
+        def heartbeat(self):
+            heartbeat_attempted.set()
+            raise OSError("connection lost")
+
+    runner = SimulationRunner.__new__(SimulationRunner)
+    runner.telecommand_client = FailingTelecommandClient()
+    runner.telecommand_heartbeat_interval_sec = 0.01
+
+    runner._start_telecommand_keepalive()
+    try:
+        assert heartbeat_attempted.wait(timeout=0.5)
+        for _ in range(50):
+            try:
+                runner._raise_telecommand_keepalive_error()
+            except ConnectionError as exc:
+                assert "connection lost" in str(exc)
+                break
+            runner_module.time.sleep(0.01)
+        else:
+            pytest.fail("keepalive failure was not reported")
+    finally:
+        runner._stop_telecommand_keepalive()

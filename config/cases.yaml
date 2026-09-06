@@ -55,7 +55,16 @@
       field: "control_mode"
       expected: "3"
       start_when:
+        #all, 全部满足; any, 任意一个满足
         match: "all"
+        #eq     等于
+        #ne     不等于
+        #lt     小于
+        #le     小于等于
+        #gt     大于
+        #ge     大于等于
+        #abs_lt 绝对值小于
+        #abs_le 绝对值小于等于
         conditions:
           - field: "roll"
             operator: "abs_lt"

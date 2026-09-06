@@ -81,6 +81,25 @@ def test_multiple_requests_share_one_persistent_connection():
         server_sock.close()
 
 
+def test_heartbeat_sends_ping_and_requires_pong_response():
+    client = make_client()
+    client_sock, server_sock = socket.socketpair()
+    client._socket = client_sock
+
+    try:
+        server_sock.sendall(b'{"code": 0, "msg": "pong", "data": null}\n')
+
+        response = client.heartbeat()
+        request = json.loads(server_sock.recv(4096).decode("utf-8"))
+
+        assert request == {"cmd": "ping"}
+        assert response["msg"] == "pong"
+        assert client.open_connection() is client_sock
+    finally:
+        client.close()
+        server_sock.close()
+
+
 def test_async_notify_and_execute_use_command_code_and_matching_request_ids():
     client = make_client()
     client_sock, server_sock = socket.socketpair()

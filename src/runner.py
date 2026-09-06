@@ -1,5 +1,5 @@
 import time
-from threading import Event
+from threading import Event, Lock, Thread
 
 import yaml
 
@@ -105,6 +105,18 @@ class SimulationRunner:
                 )
             ),
         )
+        self.telecommand_heartbeat_interval_sec = float(
+            self.telecommand_config.get(
+                "heartbeat_interval_sec",
+                tcp_config.get("heartbeat_interval_sec", 40.0),
+            )
+        )
+        if self.telecommand_heartbeat_interval_sec < 0:
+            raise ValueError("telecommand.heartbeat_interval_sec must not be negative")
+        self._telecommand_keepalive_stop_event = Event()
+        self._telecommand_keepalive_thread: Thread | None = None
+        self._telecommand_keepalive_error: Exception | None = None
+        self._telecommand_keepalive_error_lock = Lock()
 
         self.max_duration_sec = float(
             simulation_config.get("max_duration_sec", 120.0)
@@ -127,6 +139,7 @@ class SimulationRunner:
     ):
         """Prepare one case and yield telemetry frames without judging them."""
         self._wait_for_case_interval()
+        self._raise_telecommand_keepalive_error()
         try:
             reset_clear_payload = self.udp_client.send_initial_condition(
                 sim_case.initial_condition,
@@ -284,6 +297,7 @@ class SimulationRunner:
         if post_delay_sec > 0:
             time.sleep(post_delay_sec)
 
+        self._start_telecommand_keepalive()
         return reset_start_sent
 
     @staticmethod
@@ -330,15 +344,81 @@ class SimulationRunner:
         if sim_case.telemetry_codes:
             self.tcp_client.telemetry_poll_codes = list(sim_case.telemetry_codes)
         try:
-            yield from self.tcp_client.receive_frames(
+            for frame in self.tcp_client.receive_frames(
                 max_duration_sec=self.max_duration_sec,
                 stop_event=stop_event,
-            )
+            ):
+                self._raise_telecommand_keepalive_error()
+                yield frame
         finally:
             self.tcp_client.telemetry_poll_codes = original_codes
 
+    def _start_telecommand_keepalive(self) -> None:
+        """Start one daemon worker after the first successful telecommand batch."""
+        interval_sec = float(getattr(self, "telecommand_heartbeat_interval_sec", 0.0))
+        if interval_sec <= 0:
+            return
+
+        self._ensure_telecommand_keepalive_state()
+        thread = self._telecommand_keepalive_thread
+        if thread is not None and thread.is_alive():
+            return
+
+        self._telecommand_keepalive_stop_event.clear()
+        thread = Thread(
+            target=self._telecommand_keepalive_loop,
+            name="telecommand-tcp-keepalive",
+            daemon=True,
+        )
+        self._telecommand_keepalive_thread = thread
+        thread.start()
+
+    def _telecommand_keepalive_loop(self) -> None:
+        interval_sec = self.telecommand_heartbeat_interval_sec
+        while not self._telecommand_keepalive_stop_event.wait(interval_sec):
+            try:
+                self.telecommand_client.heartbeat()
+            except Exception as exc:
+                if not self._telecommand_keepalive_stop_event.is_set():
+                    with self._telecommand_keepalive_error_lock:
+                        self._telecommand_keepalive_error = exc
+                return
+
+    def _raise_telecommand_keepalive_error(self) -> None:
+        self._ensure_telecommand_keepalive_state()
+        with self._telecommand_keepalive_error_lock:
+            error = self._telecommand_keepalive_error
+        if error is not None:
+            raise ConnectionError(
+                f"telecommand TCP heartbeat failed: {error}"
+            ) from error
+
+    def _stop_telecommand_keepalive(self) -> None:
+        self._ensure_telecommand_keepalive_state()
+        self._telecommand_keepalive_stop_event.set()
+        thread = self._telecommand_keepalive_thread
+        if thread is not None:
+            timeout_sec = max(
+                float(getattr(self.telecommand_client, "timeout_sec", 2.0)) + 1.0,
+                1.0,
+            )
+            thread.join(timeout=timeout_sec)
+        self._telecommand_keepalive_thread = None
+
+    def _ensure_telecommand_keepalive_state(self) -> None:
+        """Allow focused unit tests to construct a runner with __new__."""
+        if not hasattr(self, "_telecommand_keepalive_stop_event"):
+            self._telecommand_keepalive_stop_event = Event()
+        if not hasattr(self, "_telecommand_keepalive_thread"):
+            self._telecommand_keepalive_thread = None
+        if not hasattr(self, "_telecommand_keepalive_error"):
+            self._telecommand_keepalive_error = None
+        if not hasattr(self, "_telecommand_keepalive_error_lock"):
+            self._telecommand_keepalive_error_lock = Lock()
+
     def close(self) -> None:
         """Close persistent TCP connections when the test session is ending."""
+        self._stop_telecommand_keepalive()
         self.tcp_client.close()
         self.telecommand_client.close()
 

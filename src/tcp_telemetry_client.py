@@ -2,7 +2,7 @@ import socket
 import time
 import uuid
 from collections.abc import Iterator
-from threading import Event
+from threading import Event, RLock
 
 from src.models import TelemetryFrame
 from src.protocols import (
@@ -46,6 +46,7 @@ class TcpTelemetryClient:
         self._socket: socket.socket | None = None                                    #持久TCP连接，默认为None
         self._receive_buffer = b""                                                   #未解析完的TCP数据
         self._pending_async_responses: dict[str, dict] = {}                          #提前收到或不属于当前请求的异步遥控响应
+        self._io_lock = RLock()                                                      #同一长连接的收发互斥锁
 
 
     #创建TCP连接, 在限定时间内重试
@@ -79,6 +80,15 @@ class TcpTelemetryClient:
     def ping(self) -> dict:
         return self.request_once({"cmd": "ping"})
 
+    def heartbeat(self) -> dict:
+        """Send one application-level ping and require a valid pong response."""
+        response = self.ping()
+        if not self._handle_heartbeat_response(response):
+            raise ConnectionError(
+                f"TCP heartbeat returned a non-pong response: {response!r}"
+            )
+        return response
+
     #请求单条遥测
     def get_parameter(self, tm_code: str):
         response = self.request_once({"cmd": "get", "tmCode": tm_code})
@@ -103,6 +113,26 @@ class TcpTelemetryClient:
         request_id: str | None = None,
     ) -> dict:
         """Send notify/execute and wait for its matching asynchronous result."""
+        with self._io_lock:
+            return self._send_async_telecommand_request_locked(
+                operation=operation,
+                command_code=command_code,
+                response_timeout_sec=response_timeout_sec,
+                satellite=satellite,
+                channel=channel,
+                request_id=request_id,
+            )
+
+    def _send_async_telecommand_request_locked(
+        self,
+        operation: str,
+        command_code: str,
+        response_timeout_sec: float,
+        satellite: str | None = None,
+        channel: str | None = None,
+        request_id: str | None = None,
+    ) -> dict:
+        """Locked implementation of one asynchronous telecommand exchange."""
         operation = str(operation).strip().lower()
         if operation not in {"notify", "execute"}:
             raise ValueError(
@@ -196,39 +226,42 @@ class TcpTelemetryClient:
 
     #发送命令——等待响应, 使用类自己的socket
     def request_once(self, command: dict) -> dict:
-        sock = self.open_connection()
-        self._send_command(sock, command)
-        response, self._receive_buffer = self._receive_response(
-            sock,
-            self._receive_buffer,
-        )
-        return response
+        with self._io_lock:
+            sock = self.open_connection()
+            self._send_command(sock, command)
+            response, self._receive_buffer = self._receive_response(
+                sock,
+                self._receive_buffer,
+            )
+            return response
 
 
     #返回当前持久连接
     def open_connection(self) -> socket.socket:
         """Return the process-level persistent TCP connection."""
-        if self._socket is None or self._socket.fileno() < 0:
-            self._socket = self._connect()
-            self._receive_buffer = b""
-        return self._socket
+        with self._io_lock:
+            if self._socket is None or self._socket.fileno() < 0:
+                self._socket = self._connect()
+                self._receive_buffer = b""
+            return self._socket
 
     #主动关闭客户端
     def close(self) -> None:
         """Close the persistent connection when the client process is ending."""
-        sock = self._socket
-        self._socket = None
-        self._receive_buffer = b""
-        self._pending_async_responses.clear()
-        if sock is None:
-            return
+        with self._io_lock:
+            sock = self._socket
+            self._socket = None
+            self._receive_buffer = b""
+            self._pending_async_responses.clear()
+            if sock is None:
+                return
 
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-        finally:
-            sock.close()
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            finally:
+                sock.close()
 
     #使用调用方提供的socket, socket可由外部传入
     def request_on_connection(
@@ -335,14 +368,15 @@ class TcpTelemetryClient:
 
     #socket出错或关闭时清理内部状态
     def _mark_disconnected(self, sock: socket.socket) -> None:
-        if sock is not self._socket:
-            return
-        try:
-            sock.close()
-        finally:
-            self._socket = None
-            self._receive_buffer = b""
-            self._pending_async_responses.clear()
+        with self._io_lock:
+            if sock is not self._socket:
+                return
+            try:
+                sock.close()
+            finally:
+                self._socket = None
+                self._receive_buffer = b""
+                self._pending_async_responses.clear()
 
 
     #遥测帧轮询
@@ -441,19 +475,19 @@ class TcpTelemetryClient:
             code = int(response.get("code", -1))
         except (TypeError, ValueError) as exc:
             raise ConnectionError(
-                f"TCP telemetry heartbeat returned an invalid code: {response!r}"
+                f"TCP heartbeat returned an invalid code: {response!r}"
             ) from exc
 
         if code != 0:
             raise ConnectionError(
-                f"TCP telemetry heartbeat failed: "
+                f"TCP heartbeat failed: "
                 f"code={code}, msg={response.get('msg', '')}"
             )
 
         data = response.get("data")
         if data not in (None, [], {}):
             raise ConnectionError(
-                f"TCP telemetry heartbeat returned unexpected data: {data!r}"
+                f"TCP heartbeat returned unexpected data: {data!r}"
             )
         return True
 
